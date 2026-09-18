@@ -9,6 +9,7 @@ description = "Portable YARN resource accounting for Spark applications"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = "Apache-2.0"
+dependencies = ["zstandard>=0.23.0"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",

@@ -16,7 +16,8 @@ they are not treated as the allocation ledger.
 
 ## Requirements
 
-- Python 3.10 or newer; the accounting code has no third-party Python packages.
+- Python 3.10 or newer. Installing the package also installs `zstandard` for
+  compressed Spark event logs.
 - Archived Spark rolling event logs.
 - ResourceManager logs containing node registrations, allocations, terminal
   transitions, application summaries, and ResourceCalculator evidence.
@@ -74,13 +75,17 @@ print(usage.instance_seconds_by_type)
 `event_log_uri` accepts an S3 URI, a plain local path, or a local `file://` URI.
 Passing a pre-materialized local file or rolling-event-log directory avoids an
 S3 download; the selected event log is still streamed to extract accounting
-metadata.
+metadata. Plain, `.lz4`, and `.zstd` event-log segments are supported. Individual
+event records are limited to 64 MiB of decompressed data.
 
 Incomplete archived logs return `complete=False` and indicate whether a later
 retry can help. Missing summaries, allocations, terminal transitions, or node
 registration metadata are retryable; contradictory or unsupported accounting
-policies are not. Authentication and transport errors propagate from boto3.
-The caller decides whether and how to translate instance-seconds into currency.
+policies are not. Unreadable event-log segments are isolated to their owning
+application: corrupt compressed data is retryable, while a missing decoder or
+an oversized event record is not. Authentication and transport errors propagate
+from boto3. The caller decides whether and how to translate instance-seconds
+into currency.
 
 Memory, vcores, `yarn.io/gpu`, and arbitrary numeric custom resources are
 parsed generically. Heterogeneous node classes remain separate in structured

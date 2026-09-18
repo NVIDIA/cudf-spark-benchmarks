@@ -15,10 +15,15 @@ import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import BinaryIO, Iterable
 
 
-from yarn_job_cost_eventlog import iter_eventlog_streams, iter_text_lines
+from yarn_job_cost_eventlog import (
+    EventLogCodec,
+    EventLogReadError,
+    iter_eventlog_streams,
+    iter_text_lines,
+)
 
 
 APPLICATION_ID_RE = re.compile(r"application_\d+_\d+")
@@ -65,6 +70,8 @@ class EventLogApplication:
     event_segments: set[int] = field(default_factory=set)
     task_metric_warnings: list[str] = field(default_factory=list)
     unsupported_resource_profile_ids: set[int] = field(default_factory=set)
+    event_log_read_errors: list[str] = field(default_factory=list)
+    event_log_read_retryable: bool = True
 
     def event_task_metrics_complete(self) -> bool:
         if not self.application_ended or self.task_metric_warnings:
@@ -247,22 +254,47 @@ def integer_property(properties: dict, name: str, default: int | None) -> int | 
         return None
 
 
+def _iter_application_event_lines(
+    stream: BinaryIO,
+    codec: EventLogCodec | None,
+    member_name: str,
+    application: EventLogApplication,
+) -> Iterable[str]:
+    try:
+        yield from iter_text_lines(stream, codec)
+    except EventLogReadError as error:
+        warning = f"Unable to read event-log segment {member_name}: {error}"
+        application.event_log_read_errors.append(warning)
+        application.event_log_read_retryable &= error.retryable
+        application.task_metric_warnings.append(warning)
+
+
 def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
     applications: dict[str, EventLogApplication] = {}
     by_directory: dict[str, EventLogApplication] = {}
-    for app_dir, member_name, stream, compressed in iter_eventlog_streams(path):
+    for app_dir, member_name, stream, codec in iter_eventlog_streams(path):
+        application_match = APPLICATION_ID_RE.search(app_dir)
         current = by_directory.setdefault(
-            app_dir, EventLogApplication(application_id="")
+            app_dir,
+            EventLogApplication(
+                application_id=(
+                    application_match.group() if application_match else ""
+                )
+            ),
         )
         segment_match = EVENT_SEGMENT_RE.search(member_name)
         if segment_match:
             current.event_segments.add(int(segment_match.group("segment")))
-        for line in iter_text_lines(stream, compressed):
+        for line in _iter_application_event_lines(
+            stream, codec, member_name, current
+        ):
             if not line:
                 continue
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
                 continue
             event_name = event.get("Event")
             if event_name == "SparkListenerLogStart":
@@ -372,6 +404,7 @@ def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
                     if "rewrite" in current.application_name.lower():
                         job_id += 900000
                     current.job_id = str(job_id)
+    for current in by_directory.values():
         if current.application_id:
             applications[current.application_id] = current
 
@@ -400,6 +433,9 @@ def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
             )
         current.task_metric_warnings = list(
             dict.fromkeys(current.task_metric_warnings)
+        )
+        current.event_log_read_errors = list(
+            dict.fromkeys(current.event_log_read_errors)
         )
 
     known_by_signature: dict[str, set[int]] = defaultdict(set)

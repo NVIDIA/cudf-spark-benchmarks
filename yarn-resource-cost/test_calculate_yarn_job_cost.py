@@ -19,6 +19,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+import zstandard
+
 
 SCRIPT = Path(__file__).with_name("calculate_yarn_job_cost.py")
 DISCOVERY = Path(__file__).with_name("yarn_job_cost_discovery.py")
@@ -726,6 +728,72 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                 metadata["application_123_0002"].as_metadata()["spark_duration_seconds"],
             )
 
+    def test_event_logs_read_zstd_and_ignore_non_object_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_dir = root / f"eventlog_v2_{APP_ID}"
+            app_dir.mkdir()
+            records = [
+                1,
+                "not an event",
+                [],
+                None,
+                {"Event": "SparkListenerLogStart", "Spark Version": "4.0.2"},
+                {
+                    "Event": "SparkListenerApplicationStart",
+                    "App ID": APP_ID,
+                    "App Name": "/run/j0144__job.py",
+                    "Timestamp": 1000,
+                },
+                {"Event": "SparkListenerApplicationEnd", "Timestamp": 6000},
+            ]
+            payload = (
+                "\n".join(json.dumps(record) for record in records) + "\n"
+            ).encode()
+            compressed = zstandard.ZstdCompressor().compress(payload)
+            (app_dir / f"events_1_{APP_ID}.zstd").write_bytes(compressed)
+
+            metadata = MODULE.read_event_log_metadata(root)[APP_ID]
+
+            self.assertEqual("4.0.2", metadata.spark_version)
+            self.assertEqual("144", metadata.job_id)
+            self.assertEqual(5.0, metadata.as_metadata()["spark_duration_seconds"])
+
+    def test_event_logs_isolate_corrupt_application(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            healthy_app_id = "application_123_0002"
+            healthy_dir = root / f"eventlog_v2_{healthy_app_id}"
+            healthy_dir.mkdir()
+            healthy_events = [
+                {
+                    "Event": "SparkListenerApplicationStart",
+                    "App ID": healthy_app_id,
+                    "App Name": "/run/j0144__job.py",
+                    "Timestamp": 1000,
+                },
+                {"Event": "SparkListenerApplicationEnd", "Timestamp": 6000},
+            ]
+            (healthy_dir / f"events_1_{healthy_app_id}").write_text(
+                "\n".join(json.dumps(event) for event in healthy_events) + "\n"
+            )
+
+            corrupt_app_id = "application_123_0003"
+            corrupt_dir = root / f"eventlog_v2_{corrupt_app_id}"
+            corrupt_dir.mkdir()
+            (corrupt_dir / f"events_1_{corrupt_app_id}.zstd").write_bytes(
+                b"not a zstandard frame"
+            )
+
+            metadata = MODULE.read_event_log_metadata(root)
+
+            self.assertEqual("144", metadata[healthy_app_id].job_id)
+            corrupt = metadata[corrupt_app_id]
+            self.assertTrue(corrupt.event_log_read_retryable)
+            self.assertIn("Unable to decompress", corrupt.event_log_read_errors[0])
+            self.assertIn(
+                corrupt.event_log_read_errors[0], corrupt.task_metric_warnings
+            )
 
     def test_event_logs_sum_successful_task_duration_and_require_all_segments(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1170,7 +1238,11 @@ class CalculateYarnJobCostTest(unittest.TestCase):
         )
         self.assertEqual(
             ["first", "second"],
-            list(EVENTLOG.iter_text_lines(io.BytesIO(header + payload), True)),
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(header + payload), EVENTLOG.LZ4_CODEC
+                )
+            ),
         )
 
     def test_portable_eventlog_reader_handles_literal_lz4_block(self):
@@ -1179,6 +1251,64 @@ class CalculateYarnJobCostTest(unittest.TestCase):
         self.assertEqual(
             payload, EVENTLOG.lz4_decompress_block(compressed, len(payload))
         )
+
+    def test_portable_eventlog_reader_classifies_truncated_lz4_as_retryable(self):
+        with self.assertRaisesRegex(ValueError, "Truncated LZ4Block") as raised:
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(EVENTLOG.LZ4_BLOCK_MAGIC), EVENTLOG.LZ4_CODEC
+                )
+            )
+        self.assertTrue(raised.exception.retryable)
+
+    def test_portable_eventlog_reader_handles_zstd(self):
+        payload = b"first\nsecond\n"
+        compressed = zstandard.ZstdCompressor().compress(payload)
+        self.assertEqual(
+            ["first", "second"],
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(compressed), EVENTLOG.ZSTD_CODEC
+                )
+            ),
+        )
+
+    def test_portable_eventlog_reader_preserves_split_utf8(self):
+        payload = '{"name":"caf\u00e9"}\n'.encode()
+        split = payload.index("\u00e9".encode()) + 1
+        with mock.patch.object(
+            EVENTLOG,
+            "iter_zstd_chunks",
+            return_value=iter((payload[:split], payload[split:])),
+        ):
+            lines = list(
+                EVENTLOG.iter_text_lines(io.BytesIO(), EVENTLOG.ZSTD_CODEC)
+            )
+        self.assertEqual(['{"name":"caf\u00e9"}'], lines)
+
+    def test_portable_eventlog_reader_rejects_oversized_line(self):
+        with self.assertRaisesRegex(ValueError, "8-byte limit") as raised:
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(b"123456789\n"), None, max_line_bytes=8
+                )
+            )
+        self.assertFalse(raised.exception.retryable)
+
+    def test_portable_eventlog_reader_reports_missing_zstandard(self):
+        with mock.patch.dict(sys.modules, {"zstandard": None}):
+            with self.assertRaisesRegex(ValueError, "pip install") as raised:
+                list(EVENTLOG.iter_zstd_chunks(io.BytesIO(b"not-zstd")))
+        self.assertFalse(raised.exception.retryable)
+
+    def test_portable_eventlog_reader_classifies_corrupt_zstandard_as_retryable(self):
+        with self.assertRaisesRegex(ValueError, "Unable to decompress") as raised:
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(b"not a zstandard frame"), EVENTLOG.ZSTD_CODEC
+                )
+            )
+        self.assertTrue(raised.exception.retryable)
 
     def test_portable_eventlog_reader_handles_tar_bundle(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1195,11 +1325,38 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                     ),
                 )
             streams = []
-            for app_dir, _, stream, compressed in EVENTLOG.iter_eventlog_streams(
+            for app_dir, _, stream, codec in EVENTLOG.iter_eventlog_streams(
                 archive
             ):
                 streams.append(
-                    (app_dir, list(EVENTLOG.iter_text_lines(stream, compressed)))
+                    (app_dir, list(EVENTLOG.iter_text_lines(stream, codec)))
+                )
+            self.assertEqual(
+                [("eventlog_v2_application_123_0002", ["one", "two"])], streams
+            )
+
+    def test_portable_eventlog_reader_handles_zstd_tar_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "events_1_application_123_0002.zstd"
+            source.write_bytes(
+                zstandard.ZstdCompressor().compress(b"one\ntwo\n")
+            )
+            archive = root / "events.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                bundle.add(
+                    source,
+                    arcname=(
+                        "eventlog_v2_application_123_0002/"
+                        "events_1_application_123_0002.zstd"
+                    ),
+                )
+            streams = []
+            for app_dir, _, stream, codec in EVENTLOG.iter_eventlog_streams(
+                archive
+            ):
+                streams.append(
+                    (app_dir, list(EVENTLOG.iter_text_lines(stream, codec)))
                 )
             self.assertEqual(
                 [("eventlog_v2_application_123_0002", ["one", "two"])], streams

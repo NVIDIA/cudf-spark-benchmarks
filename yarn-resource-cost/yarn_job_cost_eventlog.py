@@ -8,12 +8,22 @@ from __future__ import annotations
 
 import tarfile
 from pathlib import Path
-from typing import BinaryIO, Iterable
-
+from typing import BinaryIO, Iterable, Literal
 
 LZ4_BLOCK_MAGIC = b"LZ4Block"
 RAW_BLOCK = 0x10
 LZ4_COMPRESSED_BLOCK = 0x20
+LZ4_CODEC = "lz4"
+ZSTD_CODEC = "zstd"
+EventLogCodec = Literal["lz4", "zstd"]
+READ_SIZE = 1024 * 1024
+MAX_EVENT_LINE_BYTES = 64 * 1024 * 1024
+
+
+class EventLogReadError(ValueError):
+    def __init__(self, message: str, *, retryable: bool):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def lz4_decompress_block(src: bytes, expected_len: int) -> bytes:
@@ -47,12 +57,18 @@ def lz4_decompress_block(src: bytes, expected_len: int) -> bytes:
                     break
         match_len += 4
         if offset <= 0 or offset > len(out):
-            raise ValueError(f"Invalid LZ4 offset {offset} at compressed offset {index}")
+            raise EventLogReadError(
+                f"Invalid LZ4 offset {offset} at compressed offset {index}",
+                retryable=True,
+            )
         start = len(out) - offset
         for copy_index in range(match_len):
             out.append(out[start + copy_index])
     if len(out) != expected_len:
-        raise ValueError(f"LZ4 block length mismatch: got {len(out)}, expected {expected_len}")
+        raise EventLogReadError(
+            f"LZ4 block length mismatch: got {len(out)}, expected {expected_len}",
+            retryable=True,
+        )
     return bytes(out)
 
 
@@ -62,9 +78,11 @@ def iter_lz4block_chunks(stream: BinaryIO) -> Iterable[bytes]:
         if not header:
             return
         if len(header) != 21:
-            raise ValueError("Truncated LZ4Block header")
+            raise EventLogReadError("Truncated LZ4Block header", retryable=True)
         if header[: len(LZ4_BLOCK_MAGIC)] != LZ4_BLOCK_MAGIC:
-            raise ValueError(f"Bad LZ4Block magic: {header[:8]!r}")
+            raise EventLogReadError(
+                f"Bad LZ4Block magic: {header[:8]!r}", retryable=True
+            )
         token = header[8]
         compressed_len = int.from_bytes(header[9:13], "little")
         decompressed_len = int.from_bytes(header[13:17], "little")
@@ -72,30 +90,80 @@ def iter_lz4block_chunks(stream: BinaryIO) -> Iterable[bytes]:
             return
         block = stream.read(compressed_len)
         if len(block) != compressed_len:
-            raise ValueError("Truncated LZ4Block payload")
+            raise EventLogReadError("Truncated LZ4Block payload", retryable=True)
         method = token & 0xF0
         if method == RAW_BLOCK:
             yield block
         elif method == LZ4_COMPRESSED_BLOCK:
-            yield lz4_decompress_block(block, decompressed_len)
+            try:
+                yield lz4_decompress_block(block, decompressed_len)
+            except IndexError as error:
+                raise EventLogReadError(
+                    "Truncated LZ4 block", retryable=True
+                ) from error
         else:
-            raise ValueError(f"Unsupported LZ4Block token {token:#x}")
+            raise EventLogReadError(
+                f"Unsupported LZ4Block token {token:#x}", retryable=False
+            )
 
 
-def iter_text_lines(stream: BinaryIO, compressed: bool) -> Iterable[str]:
-    pending = ""
-    chunks = iter_lz4block_chunks(stream) if compressed else iter(lambda: stream.read(1024 * 1024), b"")
+def iter_zstd_chunks(stream: BinaryIO) -> Iterable[bytes]:
+    try:
+        import zstandard
+    except ImportError as error:
+        raise EventLogReadError(
+            "Reading .zstd event logs requires the zstandard package; "
+            "run 'python3 -m pip install .' from the bundle directory",
+            retryable=False,
+        ) from error
+    try:
+        decompressor = zstandard.ZstdDecompressor()
+        with decompressor.stream_reader(
+            stream, read_across_frames=True, closefd=False
+        ) as reader:
+            yield from iter(lambda: reader.read(READ_SIZE), b"")
+    except zstandard.ZstdError as error:
+        raise EventLogReadError(
+            f"Unable to decompress Zstandard event log: {error}",
+            retryable=True,
+        ) from error
+
+
+def iter_text_lines(
+    stream: BinaryIO,
+    codec: EventLogCodec | None,
+    max_line_bytes: int = MAX_EVENT_LINE_BYTES,
+) -> Iterable[str]:
+    if codec == LZ4_CODEC:
+        chunks = iter_lz4block_chunks(stream)
+    elif codec == ZSTD_CODEC:
+        chunks = iter_zstd_chunks(stream)
+    elif codec is None:
+        chunks = iter(lambda: stream.read(READ_SIZE), b"")
+    else:
+        raise ValueError(f"Unsupported event-log compression codec: {codec}")
+
+    pending: list[bytes] = []
+    pending_size = 0
     for chunk in chunks:
-        text = pending + chunk.decode("utf-8", errors="replace")
-        lines = text.splitlines(keepends=True)
-        pending = ""
-        for line in lines:
-            if line.endswith("\n") or line.endswith("\r"):
-                yield line.strip()
-            else:
-                pending = line
-    if pending.strip():
-        yield pending.strip()
+        for part in chunk.splitlines(keepends=True):
+            pending_size += len(part)
+            if pending_size > max_line_bytes:
+                raise EventLogReadError(
+                    f"Event-log line exceeds {max_line_bytes}-byte limit",
+                    retryable=False,
+                )
+            pending.append(part)
+            if part.endswith((b"\n", b"\r")):
+                yield b"".join(pending).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+                pending.clear()
+                pending_size = 0
+    if pending:
+        line = b"".join(pending).decode("utf-8", errors="replace").strip()
+        if line:
+            yield line
 
 
 def normalized_member_name(name: str) -> str:
@@ -104,7 +172,18 @@ def normalized_member_name(name: str) -> str:
     return name
 
 
-def iter_eventlog_streams(path: Path) -> Iterable[tuple[str, str, BinaryIO, bool]]:
+def eventlog_codec(name: str) -> EventLogCodec | None:
+    suffix = Path(name).suffix.lower()
+    if suffix == ".lz4":
+        return LZ4_CODEC
+    if suffix == ".zstd":
+        return ZSTD_CODEC
+    return None
+
+
+def iter_eventlog_streams(
+    path: Path,
+) -> Iterable[tuple[str, str, BinaryIO, EventLogCodec | None]]:
     if path.is_file() and tarfile.is_tarfile(path):
         with tarfile.open(path, mode="r:*") as tar:
             members = sorted(
@@ -120,7 +199,7 @@ def iter_eventlog_streams(path: Path) -> Iterable[tuple[str, str, BinaryIO, bool
                     continue
                 app_dir = name.split("/", 1)[0]
                 with extracted:
-                    yield app_dir, name, extracted, name.endswith(".lz4")
+                    yield app_dir, name, extracted, eventlog_codec(name)
         return
 
     if path.is_dir():
@@ -131,4 +210,4 @@ def iter_eventlog_streams(path: Path) -> Iterable[tuple[str, str, BinaryIO, bool
         rel = file_path.as_posix()
         app_dir = file_path.parent.name if file_path.parent.name.startswith("eventlog_") else file_path.stem
         with file_path.open("rb") as handle:
-            yield app_dir, rel, handle, file_path.suffix == ".lz4"
+            yield app_dir, rel, handle, eventlog_codec(file_path.name)

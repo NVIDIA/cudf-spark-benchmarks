@@ -112,6 +112,7 @@ def validate_bundle(root: Path) -> None:
         raise ValueError("Bundle CONTRIBUTING.md does not contain DCO 1.1")
     run([sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test*.py"], cwd=root)
     run([sys.executable, "yarn_resource_cost.py", "--help"], cwd=root)
+    run([sys.executable, "-S", "yarn_resource_cost.py", "--help"], cwd=root)
 
 
 def remove_bytecode(root: Path) -> None:
