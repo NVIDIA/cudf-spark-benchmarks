@@ -759,6 +759,42 @@ class CalculateYarnJobCostTest(unittest.TestCase):
             self.assertEqual("144", metadata.job_id)
             self.assertEqual(5.0, metadata.as_metadata()["spark_duration_seconds"])
 
+    def test_event_logs_isolate_corrupt_application(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            healthy_app_id = "application_123_0002"
+            healthy_dir = root / f"eventlog_v2_{healthy_app_id}"
+            healthy_dir.mkdir()
+            healthy_events = [
+                {
+                    "Event": "SparkListenerApplicationStart",
+                    "App ID": healthy_app_id,
+                    "App Name": "/run/j0144__job.py",
+                    "Timestamp": 1000,
+                },
+                {"Event": "SparkListenerApplicationEnd", "Timestamp": 6000},
+            ]
+            (healthy_dir / f"events_1_{healthy_app_id}").write_text(
+                "\n".join(json.dumps(event) for event in healthy_events) + "\n"
+            )
+
+            corrupt_app_id = "application_123_0003"
+            corrupt_dir = root / f"eventlog_v2_{corrupt_app_id}"
+            corrupt_dir.mkdir()
+            (corrupt_dir / f"events_1_{corrupt_app_id}.zstd").write_bytes(
+                b"not a zstandard frame"
+            )
+
+            metadata = MODULE.read_event_log_metadata(root)
+
+            self.assertEqual("144", metadata[healthy_app_id].job_id)
+            corrupt = metadata[corrupt_app_id]
+            self.assertTrue(corrupt.event_log_read_retryable)
+            self.assertIn("Unable to decompress", corrupt.event_log_read_errors[0])
+            self.assertIn(
+                corrupt.event_log_read_errors[0], corrupt.task_metric_warnings
+            )
+
     def test_event_logs_sum_successful_task_duration_and_require_all_segments(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1216,6 +1252,15 @@ class CalculateYarnJobCostTest(unittest.TestCase):
             payload, EVENTLOG.lz4_decompress_block(compressed, len(payload))
         )
 
+    def test_portable_eventlog_reader_classifies_truncated_lz4_as_retryable(self):
+        with self.assertRaisesRegex(ValueError, "Truncated LZ4Block") as raised:
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(EVENTLOG.LZ4_BLOCK_MAGIC), EVENTLOG.LZ4_CODEC
+                )
+            )
+        self.assertTrue(raised.exception.retryable)
+
     def test_portable_eventlog_reader_handles_zstd(self):
         payload = b"first\nsecond\n"
         compressed = zstandard.ZstdCompressor().compress(payload)
@@ -1242,17 +1287,28 @@ class CalculateYarnJobCostTest(unittest.TestCase):
         self.assertEqual(['{"name":"caf\u00e9"}'], lines)
 
     def test_portable_eventlog_reader_rejects_oversized_line(self):
-        with self.assertRaisesRegex(ValueError, "8-byte limit"):
+        with self.assertRaisesRegex(ValueError, "8-byte limit") as raised:
             list(
                 EVENTLOG.iter_text_lines(
                     io.BytesIO(b"123456789\n"), None, max_line_bytes=8
                 )
             )
+        self.assertFalse(raised.exception.retryable)
 
     def test_portable_eventlog_reader_reports_missing_zstandard(self):
         with mock.patch.dict(sys.modules, {"zstandard": None}):
-            with self.assertRaisesRegex(ValueError, "pip install"):
+            with self.assertRaisesRegex(ValueError, "pip install") as raised:
                 list(EVENTLOG.iter_zstd_chunks(io.BytesIO(b"not-zstd")))
+        self.assertFalse(raised.exception.retryable)
+
+    def test_portable_eventlog_reader_classifies_corrupt_zstandard_as_retryable(self):
+        with self.assertRaisesRegex(ValueError, "Unable to decompress") as raised:
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(b"not a zstandard frame"), EVENTLOG.ZSTD_CODEC
+                )
+            )
+        self.assertTrue(raised.exception.retryable)
 
     def test_portable_eventlog_reader_handles_tar_bundle(self):
         with tempfile.TemporaryDirectory() as directory:

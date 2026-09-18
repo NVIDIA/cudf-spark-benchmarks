@@ -226,6 +226,12 @@ def calculate_emr_application_usage(
                 f"Application {request.application_id} is missing from the Spark event log",
                 retryable=True,
             )
+        if metadata.event_log_read_errors:
+            return _empty_result(
+                request,
+                " | ".join(metadata.event_log_read_errors),
+                retryable=metadata.event_log_read_retryable,
+            )
 
         yarn_root = root / "yarn"
         downloaded = _materialize_yarn_logs(emr_client, s3_client, request.cluster_id, yarn_root)

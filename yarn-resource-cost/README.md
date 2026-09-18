@@ -81,8 +81,11 @@ event records are limited to 64 MiB of decompressed data.
 Incomplete archived logs return `complete=False` and indicate whether a later
 retry can help. Missing summaries, allocations, terminal transitions, or node
 registration metadata are retryable; contradictory or unsupported accounting
-policies are not. Authentication and transport errors propagate from boto3.
-The caller decides whether and how to translate instance-seconds into currency.
+policies are not. Unreadable event-log segments are isolated to their owning
+application: corrupt compressed data is retryable, while a missing decoder or
+an oversized event record is not. Authentication and transport errors propagate
+from boto3. The caller decides whether and how to translate instance-seconds
+into currency.
 
 Memory, vcores, `yarn.io/gpu`, and arbitrary numeric custom resources are
 parsed generically. Heterogeneous node classes remain separate in structured

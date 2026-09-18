@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import zstandard
 
@@ -217,6 +219,46 @@ class YarnJobCostApiTest(unittest.TestCase):
         self.assertEqual(24.0, result.vcore_seconds)
         self.assertEqual(24576.0, result.memory_mb_seconds)
         self.assertEqual({"m5.xlarge": 3.0}, result.instance_seconds_by_type)
+
+    def test_corrupt_zstd_event_log_is_retryable(self):
+        event_prefix = "spark-events/eventlog_v2_application_1_0001"
+        s3 = FakeS3Client(
+            {
+                f"{event_prefix}/events_1_application_1_0001.zstd": (
+                    b"not a zstandard frame"
+                )
+            }
+        )
+
+        result = calculate_emr_application_usage(
+            self.request(f"s3://test-bucket/{event_prefix}"),
+            emr_client=FakeEmrClient(),
+            s3_client=s3,
+        )
+
+        self.assertFalse(result.complete)
+        self.assertTrue(result.retryable)
+        self.assertIn("Unable to decompress", result.warnings[0])
+
+    def test_permanent_event_log_read_error_is_not_retryable(self):
+        event_log_dir = FIXTURE / "eventlog_v2_application_1_0001"
+        metadata = SimpleNamespace(
+            event_log_read_errors=["Event-log line exceeds the configured limit"],
+            event_log_read_retryable=False,
+        )
+        with mock.patch(
+            "yarn_job_cost_api.read_event_log_metadata",
+            return_value={"application_1_0001": metadata},
+        ):
+            result = calculate_emr_application_usage(
+                self.request(str(event_log_dir)),
+                emr_client=FakeEmrClient(),
+                s3_client=FakeS3Client({}),
+            )
+
+        self.assertFalse(result.complete)
+        self.assertFalse(result.retryable)
+        self.assertIn("configured limit", result.warnings[0])
 
     def test_s3_single_file_event_log_is_materialized_as_a_file(self):
         event_key = "spark-events/application_1_0001"
