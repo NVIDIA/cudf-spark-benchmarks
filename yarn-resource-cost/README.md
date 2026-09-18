@@ -16,7 +16,8 @@ they are not treated as the allocation ledger.
 
 ## Requirements
 
-- Python 3.10 or newer; the accounting code has no third-party Python packages.
+- Python 3.10 or newer. Installing the package also installs `zstandard` for
+  compressed Spark event logs.
 - Archived Spark rolling event logs.
 - ResourceManager logs containing node registrations, allocations, terminal
   transitions, application summaries, and ResourceCalculator evidence.
@@ -74,7 +75,7 @@ print(usage.instance_seconds_by_type)
 `event_log_uri` accepts an S3 URI, a plain local path, or a local `file://` URI.
 Passing a pre-materialized local file or rolling-event-log directory avoids an
 S3 download; the selected event log is still streamed to extract accounting
-metadata.
+metadata. Plain, `.lz4`, and `.zstd` event-log segments are supported.
 
 Incomplete archived logs return `complete=False` and indicate whether a later
 retry can help. Missing summaries, allocations, terminal transitions, or node

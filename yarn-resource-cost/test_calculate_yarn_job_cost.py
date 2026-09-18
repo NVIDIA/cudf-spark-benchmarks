@@ -19,6 +19,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+import zstandard
+
 
 SCRIPT = Path(__file__).with_name("calculate_yarn_job_cost.py")
 DISCOVERY = Path(__file__).with_name("yarn_job_cost_discovery.py")
@@ -726,6 +728,36 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                 metadata["application_123_0002"].as_metadata()["spark_duration_seconds"],
             )
 
+    def test_event_logs_read_zstd_and_ignore_non_object_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_dir = root / f"eventlog_v2_{APP_ID}"
+            app_dir.mkdir()
+            records = [
+                1,
+                "not an event",
+                [],
+                None,
+                {"Event": "SparkListenerLogStart", "Spark Version": "4.0.2"},
+                {
+                    "Event": "SparkListenerApplicationStart",
+                    "App ID": APP_ID,
+                    "App Name": "/run/j0144__job.py",
+                    "Timestamp": 1000,
+                },
+                {"Event": "SparkListenerApplicationEnd", "Timestamp": 6000},
+            ]
+            payload = (
+                "\n".join(json.dumps(record) for record in records) + "\n"
+            ).encode()
+            compressed = zstandard.ZstdCompressor().compress(payload)
+            (app_dir / f"events_1_{APP_ID}.zstd").write_bytes(compressed)
+
+            metadata = MODULE.read_event_log_metadata(root)[APP_ID]
+
+            self.assertEqual("4.0.2", metadata.spark_version)
+            self.assertEqual("144", metadata.job_id)
+            self.assertEqual(5.0, metadata.as_metadata()["spark_duration_seconds"])
 
     def test_event_logs_sum_successful_task_duration_and_require_all_segments(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1170,7 +1202,11 @@ class CalculateYarnJobCostTest(unittest.TestCase):
         )
         self.assertEqual(
             ["first", "second"],
-            list(EVENTLOG.iter_text_lines(io.BytesIO(header + payload), True)),
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(header + payload), EVENTLOG.LZ4_CODEC
+                )
+            ),
         )
 
     def test_portable_eventlog_reader_handles_literal_lz4_block(self):
@@ -1178,6 +1214,18 @@ class CalculateYarnJobCostTest(unittest.TestCase):
         compressed = bytes([len(payload) << 4]) + payload
         self.assertEqual(
             payload, EVENTLOG.lz4_decompress_block(compressed, len(payload))
+        )
+
+    def test_portable_eventlog_reader_handles_zstd(self):
+        payload = b"first\nsecond\n"
+        compressed = zstandard.ZstdCompressor().compress(payload)
+        self.assertEqual(
+            ["first", "second"],
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(compressed), EVENTLOG.ZSTD_CODEC
+                )
+            ),
         )
 
     def test_portable_eventlog_reader_handles_tar_bundle(self):
@@ -1195,11 +1243,38 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                     ),
                 )
             streams = []
-            for app_dir, _, stream, compressed in EVENTLOG.iter_eventlog_streams(
+            for app_dir, _, stream, codec in EVENTLOG.iter_eventlog_streams(
                 archive
             ):
                 streams.append(
-                    (app_dir, list(EVENTLOG.iter_text_lines(stream, compressed)))
+                    (app_dir, list(EVENTLOG.iter_text_lines(stream, codec)))
+                )
+            self.assertEqual(
+                [("eventlog_v2_application_123_0002", ["one", "two"])], streams
+            )
+
+    def test_portable_eventlog_reader_handles_zstd_tar_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "events_1_application_123_0002.zstd"
+            source.write_bytes(
+                zstandard.ZstdCompressor().compress(b"one\ntwo\n")
+            )
+            archive = root / "events.tar.gz"
+            with tarfile.open(archive, "w:gz") as bundle:
+                bundle.add(
+                    source,
+                    arcname=(
+                        "eventlog_v2_application_123_0002/"
+                        "events_1_application_123_0002.zstd"
+                    ),
+                )
+            streams = []
+            for app_dir, _, stream, codec in EVENTLOG.iter_eventlog_streams(
+                archive
+            ):
+                streams.append(
+                    (app_dir, list(EVENTLOG.iter_text_lines(stream, codec)))
                 )
             self.assertEqual(
                 [("eventlog_v2_application_123_0002", ["one", "two"])], streams

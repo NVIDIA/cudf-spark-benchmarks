@@ -8,12 +8,18 @@ from __future__ import annotations
 
 import tarfile
 from pathlib import Path
-from typing import BinaryIO, Iterable
+from typing import BinaryIO, Iterable, Literal
+
+import zstandard
 
 
 LZ4_BLOCK_MAGIC = b"LZ4Block"
 RAW_BLOCK = 0x10
 LZ4_COMPRESSED_BLOCK = 0x20
+LZ4_CODEC = "lz4"
+ZSTD_CODEC = "zstd"
+EventLogCodec = Literal["lz4", "zstd"]
+READ_SIZE = 1024 * 1024
 
 
 def lz4_decompress_block(src: bytes, expected_len: int) -> bytes:
@@ -82,9 +88,26 @@ def iter_lz4block_chunks(stream: BinaryIO) -> Iterable[bytes]:
             raise ValueError(f"Unsupported LZ4Block token {token:#x}")
 
 
-def iter_text_lines(stream: BinaryIO, compressed: bool) -> Iterable[str]:
+def iter_zstd_chunks(stream: BinaryIO) -> Iterable[bytes]:
+    decompressor = zstandard.ZstdDecompressor()
+    with decompressor.stream_reader(
+        stream, read_across_frames=True, closefd=False
+    ) as reader:
+        yield from iter(lambda: reader.read(READ_SIZE), b"")
+
+
+def iter_text_lines(
+    stream: BinaryIO, codec: EventLogCodec | None
+) -> Iterable[str]:
     pending = ""
-    chunks = iter_lz4block_chunks(stream) if compressed else iter(lambda: stream.read(1024 * 1024), b"")
+    if codec == LZ4_CODEC:
+        chunks = iter_lz4block_chunks(stream)
+    elif codec == ZSTD_CODEC:
+        chunks = iter_zstd_chunks(stream)
+    elif codec is None:
+        chunks = iter(lambda: stream.read(READ_SIZE), b"")
+    else:
+        raise ValueError(f"Unsupported event-log compression codec: {codec}")
     for chunk in chunks:
         text = pending + chunk.decode("utf-8", errors="replace")
         lines = text.splitlines(keepends=True)
@@ -104,7 +127,18 @@ def normalized_member_name(name: str) -> str:
     return name
 
 
-def iter_eventlog_streams(path: Path) -> Iterable[tuple[str, str, BinaryIO, bool]]:
+def eventlog_codec(name: str) -> EventLogCodec | None:
+    suffix = Path(name).suffix.lower()
+    if suffix == ".lz4":
+        return LZ4_CODEC
+    if suffix == ".zstd":
+        return ZSTD_CODEC
+    return None
+
+
+def iter_eventlog_streams(
+    path: Path,
+) -> Iterable[tuple[str, str, BinaryIO, EventLogCodec | None]]:
     if path.is_file() and tarfile.is_tarfile(path):
         with tarfile.open(path, mode="r:*") as tar:
             members = sorted(
@@ -120,7 +154,7 @@ def iter_eventlog_streams(path: Path) -> Iterable[tuple[str, str, BinaryIO, bool
                     continue
                 app_dir = name.split("/", 1)[0]
                 with extracted:
-                    yield app_dir, name, extracted, name.endswith(".lz4")
+                    yield app_dir, name, extracted, eventlog_codec(name)
         return
 
     if path.is_dir():
@@ -131,4 +165,4 @@ def iter_eventlog_streams(path: Path) -> Iterable[tuple[str, str, BinaryIO, bool
         rel = file_path.as_posix()
         app_dir = file_path.parent.name if file_path.parent.name.startswith("eventlog_") else file_path.stem
         with file_path.open("rb") as handle:
-            yield app_dir, rel, handle, file_path.suffix == ".lz4"
+            yield app_dir, rel, handle, eventlog_codec(file_path.name)

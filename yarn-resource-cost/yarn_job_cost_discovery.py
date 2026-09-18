@@ -250,19 +250,21 @@ def integer_property(properties: dict, name: str, default: int | None) -> int | 
 def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
     applications: dict[str, EventLogApplication] = {}
     by_directory: dict[str, EventLogApplication] = {}
-    for app_dir, member_name, stream, compressed in iter_eventlog_streams(path):
+    for app_dir, member_name, stream, codec in iter_eventlog_streams(path):
         current = by_directory.setdefault(
             app_dir, EventLogApplication(application_id="")
         )
         segment_match = EVENT_SEGMENT_RE.search(member_name)
         if segment_match:
             current.event_segments.add(int(segment_match.group("segment")))
-        for line in iter_text_lines(stream, compressed):
+        for line in iter_text_lines(stream, codec):
             if not line:
                 continue
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
                 continue
             event_name = event.get("Event")
             if event_name == "SparkListenerLogStart":

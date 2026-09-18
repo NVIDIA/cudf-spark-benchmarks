@@ -10,6 +10,8 @@ import io
 import unittest
 from pathlib import Path
 
+import zstandard
+
 from yarn_job_cost_api import (
     EmrApplicationUsageRequest,
     calculate_emr_application_usage,
@@ -170,7 +172,7 @@ class YarnJobCostApiTest(unittest.TestCase):
         self.assertTrue(result.retryable)
         self.assertIn("unknown instance type", " | ".join(result.warnings))
 
-    def test_s3_rolling_event_log_segments_stay_grouped(self):
+    def test_s3_zstd_rolling_event_log_segments_stay_grouped(self):
         event_prefix = "spark-events/eventlog_v2_application_1_0001"
         segment_1 = "\n".join(
             (
@@ -190,10 +192,15 @@ class YarnJobCostApiTest(unittest.TestCase):
                 '{"Event":"SparkListenerApplicationEnd","Timestamp":11000}',
             )
         )
+        compressor = zstandard.ZstdCompressor()
         s3 = FakeS3Client(
             {
-                f"{event_prefix}/events_1_application_1_0001": segment_1.encode(),
-                f"{event_prefix}/events_2_application_1_0001": segment_2.encode(),
+                f"{event_prefix}/events_1_application_1_0001.zstd": (
+                    compressor.compress(segment_1.encode())
+                ),
+                f"{event_prefix}/events_2_application_1_0001.zstd": (
+                    compressor.compress(segment_2.encode())
+                ),
                 "emr-logs/j-TEST/node/i-1/applications/"
                 "hadoop-yarn-resourcemanager-rm.log": self.yarn_log_with_instance_type().encode(),
             }
