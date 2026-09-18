@@ -132,6 +132,7 @@ class PortableCliTest(unittest.TestCase):
             completed = subprocess.run(
                 [
                     sys.executable,
+                    "-S",
                     str(SCRIPT),
                     "--adapter",
                     "on-prem",

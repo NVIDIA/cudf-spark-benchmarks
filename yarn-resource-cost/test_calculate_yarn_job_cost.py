@@ -1228,6 +1228,32 @@ class CalculateYarnJobCostTest(unittest.TestCase):
             ),
         )
 
+    def test_portable_eventlog_reader_preserves_split_utf8(self):
+        payload = '{"name":"caf\u00e9"}\n'.encode()
+        split = payload.index("\u00e9".encode()) + 1
+        with mock.patch.object(
+            EVENTLOG,
+            "iter_zstd_chunks",
+            return_value=iter((payload[:split], payload[split:])),
+        ):
+            lines = list(
+                EVENTLOG.iter_text_lines(io.BytesIO(), EVENTLOG.ZSTD_CODEC)
+            )
+        self.assertEqual(['{"name":"caf\u00e9"}'], lines)
+
+    def test_portable_eventlog_reader_rejects_oversized_line(self):
+        with self.assertRaisesRegex(ValueError, "8-byte limit"):
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(b"123456789\n"), None, max_line_bytes=8
+                )
+            )
+
+    def test_portable_eventlog_reader_reports_missing_zstandard(self):
+        with mock.patch.dict(sys.modules, {"zstandard": None}):
+            with self.assertRaisesRegex(ValueError, "pip install"):
+                list(EVENTLOG.iter_zstd_chunks(io.BytesIO(b"not-zstd")))
+
     def test_portable_eventlog_reader_handles_tar_bundle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

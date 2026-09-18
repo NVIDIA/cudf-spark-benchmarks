@@ -10,9 +10,6 @@ import tarfile
 from pathlib import Path
 from typing import BinaryIO, Iterable, Literal
 
-import zstandard
-
-
 LZ4_BLOCK_MAGIC = b"LZ4Block"
 RAW_BLOCK = 0x10
 LZ4_COMPRESSED_BLOCK = 0x20
@@ -20,6 +17,7 @@ LZ4_CODEC = "lz4"
 ZSTD_CODEC = "zstd"
 EventLogCodec = Literal["lz4", "zstd"]
 READ_SIZE = 1024 * 1024
+MAX_EVENT_LINE_BYTES = 64 * 1024 * 1024
 
 
 def lz4_decompress_block(src: bytes, expected_len: int) -> bytes:
@@ -89,6 +87,13 @@ def iter_lz4block_chunks(stream: BinaryIO) -> Iterable[bytes]:
 
 
 def iter_zstd_chunks(stream: BinaryIO) -> Iterable[bytes]:
+    try:
+        import zstandard
+    except ImportError as error:
+        raise ValueError(
+            "Reading .zstd event logs requires the zstandard package; "
+            "run 'python3 -m pip install .' from the bundle directory"
+        ) from error
     decompressor = zstandard.ZstdDecompressor()
     with decompressor.stream_reader(
         stream, read_across_frames=True, closefd=False
@@ -97,9 +102,10 @@ def iter_zstd_chunks(stream: BinaryIO) -> Iterable[bytes]:
 
 
 def iter_text_lines(
-    stream: BinaryIO, codec: EventLogCodec | None
+    stream: BinaryIO,
+    codec: EventLogCodec | None,
+    max_line_bytes: int = MAX_EVENT_LINE_BYTES,
 ) -> Iterable[str]:
-    pending = ""
     if codec == LZ4_CODEC:
         chunks = iter_lz4block_chunks(stream)
     elif codec == ZSTD_CODEC:
@@ -108,17 +114,27 @@ def iter_text_lines(
         chunks = iter(lambda: stream.read(READ_SIZE), b"")
     else:
         raise ValueError(f"Unsupported event-log compression codec: {codec}")
+
+    pending: list[bytes] = []
+    pending_size = 0
     for chunk in chunks:
-        text = pending + chunk.decode("utf-8", errors="replace")
-        lines = text.splitlines(keepends=True)
-        pending = ""
-        for line in lines:
-            if line.endswith("\n") or line.endswith("\r"):
-                yield line.strip()
-            else:
-                pending = line
-    if pending.strip():
-        yield pending.strip()
+        for part in chunk.splitlines(keepends=True):
+            pending_size += len(part)
+            if pending_size > max_line_bytes:
+                raise ValueError(
+                    f"Event-log line exceeds {max_line_bytes}-byte limit"
+                )
+            pending.append(part)
+            if part.endswith((b"\n", b"\r")):
+                yield b"".join(pending).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+                pending.clear()
+                pending_size = 0
+    if pending:
+        line = b"".join(pending).decode("utf-8", errors="replace").strip()
+        if line:
+            yield line
 
 
 def normalized_member_name(name: str) -> str:
