@@ -240,6 +240,40 @@ class YarnJobCostApiTest(unittest.TestCase):
         self.assertTrue(result.retryable)
         self.assertIn("Unable to decompress", result.warnings[0])
 
+    def test_truncated_concatenated_zstd_event_log_is_retryable(self):
+        event_prefix = "spark-events/eventlog_v2_application_1_0001"
+        events = "\n".join(
+            (
+                '{"Event":"SparkListenerApplicationStart","App Name":'
+                '"portable-cost-sample","App ID":"application_1_0001",'
+                '"Timestamp":1000}',
+                '{"Event":"SparkListenerApplicationEnd","Timestamp":11000}',
+            )
+        ).encode()
+        compressor = zstandard.ZstdCompressor()
+        compressed = compressor.compress(events) + compressor.compress(b"later\n")[
+            :-1
+        ]
+        s3 = FakeS3Client(
+            {
+                f"{event_prefix}/events_1_application_1_0001.zstd": compressed,
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": (
+                    self.yarn_log_with_instance_type().encode()
+                ),
+            }
+        )
+
+        result = calculate_emr_application_usage(
+            self.request(f"s3://test-bucket/{event_prefix}"),
+            emr_client=FakeEmrClient(),
+            s3_client=s3,
+        )
+
+        self.assertFalse(result.complete)
+        self.assertTrue(result.retryable)
+        self.assertIn("Truncated Zstandard frame", " | ".join(result.warnings))
+
     def test_permanent_event_log_read_error_is_not_retryable(self):
         event_log_dir = FIXTURE / "eventlog_v2_application_1_0001"
         metadata = SimpleNamespace(
