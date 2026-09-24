@@ -1273,6 +1273,21 @@ class CalculateYarnJobCostTest(unittest.TestCase):
             ),
         )
 
+    def test_portable_eventlog_reader_handles_concatenated_zstandard(self):
+        compressor = zstandard.ZstdCompressor()
+        compressed = compressor.compress(b"first\n") + compressor.compress(
+            b"second\n"
+        )
+
+        self.assertEqual(
+            ["first", "second"],
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(compressed), EVENTLOG.ZSTD_CODEC
+                )
+            ),
+        )
+
     def test_portable_eventlog_reader_preserves_split_utf8(self):
         payload = '{"name":"caf\u00e9"}\n'.encode()
         split = payload.index("\u00e9".encode()) + 1
@@ -1308,6 +1323,37 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                     io.BytesIO(b"not a zstandard frame"), EVENTLOG.ZSTD_CODEC
                 )
             )
+        self.assertTrue(raised.exception.retryable)
+
+    def test_portable_eventlog_reader_classifies_truncated_zstandard_as_retryable(
+        self,
+    ):
+        compressed = zstandard.ZstdCompressor().compress(b"one\ntwo\n")
+
+        with self.assertRaisesRegex(ValueError, "Truncated Zstandard") as raised:
+            list(
+                EVENTLOG.iter_text_lines(
+                    io.BytesIO(compressed[:-1]), EVENTLOG.ZSTD_CODEC
+                )
+            )
+
+        self.assertTrue(raised.exception.retryable)
+
+    def test_portable_eventlog_reader_rejects_truncated_concatenated_zstandard(
+        self,
+    ):
+        compressor = zstandard.ZstdCompressor()
+        compressed = compressor.compress(b"one\n") + compressor.compress(b"two\n")[
+            :-1
+        ]
+        lines = EVENTLOG.iter_text_lines(
+            io.BytesIO(compressed), EVENTLOG.ZSTD_CODEC
+        )
+
+        self.assertEqual("one", next(lines))
+        with self.assertRaisesRegex(ValueError, "Truncated Zstandard") as raised:
+            list(lines)
+
         self.assertTrue(raised.exception.retryable)
 
     def test_portable_eventlog_reader_handles_tar_bundle(self):
