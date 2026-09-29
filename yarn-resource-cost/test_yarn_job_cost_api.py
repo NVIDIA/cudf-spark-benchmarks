@@ -170,6 +170,24 @@ class YarnJobCostApiTest(unittest.TestCase):
         self.assertTrue(result.complete)
         self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
 
+    def test_empty_shipped_log_object_falls_back_to_cluster_log_uri(self):
+        s3 = FakeS3Client(
+            {
+                "yarn-rm-logs/j-TEST/ip-10-0-0-1/"
+                "hadoop-yarn-resourcemanager-20260928-120000-a.log": b"",
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": self.yarn_log_with_instance_type().encode(),
+            }
+        )
+        request = replace(self.request(), yarn_log_uri="s3://test-bucket/yarn-rm-logs/j-TEST/")
+
+        result = calculate_emr_application_usage(
+            request, emr_client=FakeEmrClient(), s3_client=s3
+        )
+
+        self.assertTrue(result.complete)
+        self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+
     def test_request_rejects_non_s3_yarn_log_uri(self):
         with self.assertRaisesRegex(ValueError, "Expected an S3 URI"):
             replace(self.request(), yarn_log_uri="/var/log/hadoop-yarn")

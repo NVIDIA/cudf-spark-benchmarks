@@ -191,7 +191,8 @@ def _download_yarn_logs(
     objects = [
         item
         for item in _list_s3_objects(s3_client, bucket, prefix)
-        if any(marker in Path(str(item.get("Key") or "")).name for marker in markers)
+        if item.get("Size") != 0  # a zero-byte placeholder is not usable evidence
+        and any(marker in Path(str(item.get("Key") or "")).name for marker in markers)
     ]
     return _download_objects(s3_client, bucket, prefix, objects, destination)
 
