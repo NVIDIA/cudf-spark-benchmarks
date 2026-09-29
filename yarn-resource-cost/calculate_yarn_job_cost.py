@@ -556,7 +556,8 @@ def materialize_yarn_logs(
 
     Use yarn_log_shipper_uri when a log shipper uploads ResourceManager logs
     faster than the EMR log archive. When it contains no ResourceManager
-    logs, the EMR log URI is used instead.
+    logs, the EMR log URI is used instead. Shipped logs keep growing while the
+    cluster runs, so they are always re-synced rather than served from cache.
     """
     if yarn_log_shipper_uri:
         try:
@@ -564,7 +565,7 @@ def materialize_yarn_logs(
                 yarn_log_shipper_uri,
                 cache_dir,
                 aws_profile,
-                refresh=refresh,
+                refresh=True,
                 markers=("hadoop-yarn-resourcemanager",),
             )
         except (ValueError, FileNotFoundError):
@@ -1985,7 +1986,7 @@ def parse_args() -> argparse.Namespace:
             "Optional S3 prefix holding this cluster's ResourceManager logs from a "
             "log shipper. Use this when the shipper uploads faster than the EMR log "
             "archive; falls back to the resolved EMR log URI when it contains no "
-            "ResourceManager logs."
+            "ResourceManager logs. Always re-downloaded, never served from cache."
         ),
     )
     parser.add_argument(
