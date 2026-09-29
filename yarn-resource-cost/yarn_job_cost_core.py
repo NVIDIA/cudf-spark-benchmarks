@@ -76,6 +76,7 @@ class Node:
     vcores: int | None = None
     gpus: int = 0
     resources: dict[str, int] = field(default_factory=dict)
+    registered_with_rm: bool = False
 
     @property
     def node_class(self) -> str:
@@ -313,6 +314,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                         vcores=resources["vcores"],
                         gpus=resources.get("yarn.io/gpu", 0),
                         resources=resources,
+                        registered_with_rm=True,
                     )
                     continue
                 node_match = NODE_RE.search(line)

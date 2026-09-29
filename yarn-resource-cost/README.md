@@ -202,6 +202,9 @@ Pricing is deliberately separate from accounting:
 JSON output uses `schema_version: 1` and retains input roots, discovery source,
 calculator evidence, node capacities, resource expressions, completeness,
 warnings, pricing provenance, applications, and run summaries.
+The `nodes` object contains RM-registered nodes and nodes referenced by
+containers of the selected applications; unrelated daemon-log directory names
+are omitted.
 
 ## Reproducible experiment capture
 
