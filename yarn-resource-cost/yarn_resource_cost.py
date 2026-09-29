@@ -282,6 +282,13 @@ def analyze_run(
     for app in applications:
         app["comparison_key"] = application_key(app, args)
         app["resource_expression"] = app.get("cost_expression", "")
+    # The parser also creates path-based NodeManager fallback nodes. Keep one
+    # only when a selected application's container actually uses it.
+    selected_node_ids = {
+        container.node_id
+        for container in evidence.containers.values()
+        if container.application_id in selected_ids
+    }
     return {
         "schema_version": 1,
         "adapter": args.adapter,
@@ -306,6 +313,7 @@ def analyze_run(
                 },
             }
             for node_id, node in sorted(evidence.nodes.items())
+            if node.registered_with_rm or node_id in selected_node_ids
         },
         "applications": applications,
         "summary": summarize_applications(applications),
