@@ -23,7 +23,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -531,8 +530,7 @@ def materialize_emr_logs(
     if marker.is_file() and not refresh:
         return target
     if refresh:
-        # Drop the previous snapshot so logs removed or rotated upstream are not kept.
-        shutil.rmtree(target, ignore_errors=True)
+        marker.unlink(missing_ok=True)
     target.mkdir(parents=True, exist_ok=True)
     command = ["aws"]
     if aws_profile:
