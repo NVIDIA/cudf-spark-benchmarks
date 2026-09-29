@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Callable, TextIO
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -546,7 +546,7 @@ def materialize_emr_logs(
 
 
 def materialize_yarn_logs(
-    emr_log_uri: str,
+    emr_log_uri: str | Callable[[], str],
     cache_dir: Path,
     aws_profile: str | None,
     refresh: bool = False,
@@ -556,7 +556,8 @@ def materialize_yarn_logs(
 
     Use yarn_log_shipper_uri when a log shipper uploads ResourceManager logs
     faster than the EMR log archive. When it contains no ResourceManager
-    logs, the EMR log URI is used instead. Shipped logs keep growing while the
+    logs, the EMR log URI is used instead; pass it as a callable to defer
+    resolving it until that fallback is needed. Shipped logs keep growing while the
     cluster runs, so they are always re-synced rather than served from cache.
     """
     if yarn_log_shipper_uri:
@@ -570,6 +571,8 @@ def materialize_yarn_logs(
             )
         except (ValueError, FileNotFoundError):
             pass
+    if callable(emr_log_uri):
+        emr_log_uri = emr_log_uri()
     return materialize_emr_logs(emr_log_uri, cache_dir, aws_profile, refresh=refresh)
 
 
@@ -1830,6 +1833,11 @@ def merge_test_analyses(
 def run_comparison(args: argparse.Namespace) -> int:
     if not args.event_log_root:
         raise ValueError("--test-event-log-root requires --event-log-root")
+    if args.yarn_log_shipper_uri:
+        raise ValueError(
+            "--yarn-log-shipper-uri names one cluster's logs and cannot be applied to "
+            "a comparison; run each event-log root separately"
+        )
     baseline = analyze_event_root_for_comparison(args.event_log_root, args)
     test_roots = args.test_event_log_root
     test_runs = [
@@ -1986,7 +1994,8 @@ def parse_args() -> argparse.Namespace:
             "Optional S3 prefix holding this cluster's ResourceManager logs from a "
             "log shipper. Use this when the shipper uploads faster than the EMR log "
             "archive; falls back to the resolved EMR log URI when it contains no "
-            "ResourceManager logs. Always re-downloaded, never served from cache."
+            "ResourceManager logs. Always re-downloaded, never served from cache. "
+            "Not supported with --test-event-log-root."
         ),
     )
     parser.add_argument(
@@ -2019,6 +2028,7 @@ def main() -> int:
     selected_application_ids: set[str] | None = None
     cluster_id = ""
     emr_log_uri = args.emr_log_uri
+    resolved_emr_log_uri: list[str] = []
     local_event_path: Path | None = None
 
     if args.event_log_root:
@@ -2040,15 +2050,27 @@ def main() -> int:
                 + (", ".join(sorted(cluster_ids)) or "none")
             )
         cluster_id = next(iter(cluster_ids))
-        emr_log_uri = resolve_emr_log_uri(cluster_id, args.aws_profile, args.aws_region)
+
+        def emr_log_uri_resolver() -> str:
+            resolved = resolve_emr_log_uri(cluster_id, args.aws_profile, args.aws_region)
+            resolved_emr_log_uri.append(resolved)
+            return resolved
+
+        log_source: str | Callable[[], str] = emr_log_uri_resolver
+    else:
+        log_source = emr_log_uri
 
     local_logs = materialize_yarn_logs(
-        emr_log_uri,
+        log_source,
         args.cache_dir,
         args.aws_profile,
         refresh=args.refresh_emr_log_cache,
         yarn_log_shipper_uri=args.yarn_log_shipper_uri,
     )
+    if resolved_emr_log_uri:
+        emr_log_uri = resolved_emr_log_uri[0]
+    elif args.event_log_root:
+        emr_log_uri = ""  # LogUri lookup skipped: the log shipper supplied the logs
     evidence = parse_yarn_logs(local_logs)
     mode = calculator_mode(evidence.calculator_class)
     metadata = {app_id: app.as_metadata() for app_id, app in event_metadata.items()}

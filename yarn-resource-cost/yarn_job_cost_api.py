@@ -185,6 +185,9 @@ def _download_yarn_logs(
     destination: Path,
 ) -> list[Path]:
     bucket, prefix = _split_s3_uri(log_uri)
+    if prefix and not prefix.endswith("/"):
+        # Directory boundary: "j-TEST" must not also match "j-TEST2/".
+        prefix += "/"
     objects = [
         item
         for item in _list_s3_objects(s3_client, bucket, prefix)
