@@ -28,11 +28,20 @@ class EmrApplicationUsageRequest:
     event_log_uri: str
     region: str
     include_application_master: bool = False
+    yarn_log_uri: str | None = None
+    """Optional S3 prefix holding this cluster's ResourceManager logs.
+
+    Use this when a log shipper uploads ResourceManager logs faster than the EMR
+    log pusher. When it contains no ResourceManager logs, the cluster LogUri
+    archive is used instead.
+    """
 
     def __post_init__(self) -> None:
         for name in ("cluster_id", "application_id", "event_log_uri", "region"):
             if not getattr(self, name).strip():
                 raise ValueError(f"{name} is required")
+        if self.yarn_log_uri is not None:
+            _split_s3_uri(self.yarn_log_uri)
 
 
 @dataclass(frozen=True)
@@ -169,22 +178,40 @@ def _cluster_log_uri(emr_client: Any, cluster_id: str) -> str:
     return normalized.rstrip("/") + f"/{cluster_id}/"
 
 
+def _download_yarn_logs(
+    s3_client: Any,
+    log_uri: str,
+    markers: tuple[str, ...],
+    destination: Path,
+) -> list[Path]:
+    bucket, prefix = _split_s3_uri(log_uri)
+    objects = [
+        item
+        for item in _list_s3_objects(s3_client, bucket, prefix)
+        if any(marker in Path(str(item.get("Key") or "")).name for marker in markers)
+    ]
+    return _download_objects(s3_client, bucket, prefix, objects, destination)
+
+
 def _materialize_yarn_logs(
     emr_client: Any,
     s3_client: Any,
     cluster_id: str,
     destination: Path,
+    yarn_log_uri: str | None = None,
 ) -> list[Path]:
-    bucket, prefix = _split_s3_uri(_cluster_log_uri(emr_client, cluster_id))
-    objects = [
-        item
-        for item in _list_s3_objects(s3_client, bucket, prefix)
-        if any(
-            marker in Path(str(item.get("Key") or "")).name
-            for marker in ("hadoop-yarn-resourcemanager", "hadoop-yarn-nodemanager")
+    if yarn_log_uri:
+        downloaded = _download_yarn_logs(
+            s3_client, yarn_log_uri, ("hadoop-yarn-resourcemanager",), destination
         )
-    ]
-    return _download_objects(s3_client, bucket, prefix, objects, destination)
+        if downloaded:
+            return downloaded
+    return _download_yarn_logs(
+        s3_client,
+        _cluster_log_uri(emr_client, cluster_id),
+        ("hadoop-yarn-resourcemanager", "hadoop-yarn-nodemanager"),
+        destination,
+    )
 
 
 def _empty_result(
@@ -234,7 +261,13 @@ def calculate_emr_application_usage(
             )
 
         yarn_root = root / "yarn"
-        downloaded = _materialize_yarn_logs(emr_client, s3_client, request.cluster_id, yarn_root)
+        downloaded = _materialize_yarn_logs(
+            emr_client,
+            s3_client,
+            request.cluster_id,
+            yarn_root,
+            request.yarn_log_uri,
+        )
         if not downloaded:
             return _empty_result(
                 request,

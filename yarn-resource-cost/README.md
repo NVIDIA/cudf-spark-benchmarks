@@ -72,6 +72,13 @@ usage = calculate_emr_application_usage(
 print(usage.instance_seconds_by_type)
 ```
 
+ResourceManager and NodeManager logs are read from the cluster's EMR `LogUri`
+archive by default, which the EMR log pusher updates about every five minutes.
+Set `yarn_log_uri` to an S3 prefix holding this cluster's ResourceManager logs
+when a log shipper uploads them sooner. Only file names containing
+`hadoop-yarn-resourcemanager` are read from that prefix; when none exist yet,
+the `LogUri` archive is used instead.
+
 `event_log_uri` accepts an S3 URI, a plain local path, or a local `file://` URI.
 Passing a pre-materialized local file or rolling-event-log directory avoids an
 S3 download; the selected event log is still streamed to extract accounting

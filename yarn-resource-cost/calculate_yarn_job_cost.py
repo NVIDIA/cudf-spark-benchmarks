@@ -514,6 +514,7 @@ def materialize_emr_logs(
     cache_dir: Path,
     aws_profile: str | None,
     refresh: bool = False,
+    markers: tuple[str, ...] = ("hadoop-yarn-nodemanager", "hadoop-yarn-resourcemanager"),
 ) -> Path:
     if not uri.startswith(("s3://", "s3a://", "s3n://")):
         path = Path(uri).expanduser()
@@ -534,24 +535,41 @@ def materialize_emr_logs(
     command = ["aws"]
     if aws_profile:
         command += ["--profile", aws_profile]
-    command += [
-        "s3",
-        "cp",
-        "--recursive",
-        s3_uri.rstrip("/") + "/",
-        str(target),
-        "--exclude",
-        "*",
-        "--include",
-        "*hadoop-yarn-nodemanager*.log*",
-        "--include",
-        "*hadoop-yarn-resourcemanager*.log*",
-    ]
+    command += ["s3", "cp", "--recursive", s3_uri.rstrip("/") + "/", str(target), "--exclude", "*"]
+    for marker_name in markers:
+        command += ["--include", f"*{marker_name}*.log*"]
     subprocess.run(command, check=True)
     if not relevant_log_files(target):
         raise ValueError(f"No YARN logs downloaded from {s3_uri}")
     marker.write_text(s3_uri + "\n")
     return target
+
+
+def materialize_yarn_logs(
+    emr_log_uri: str,
+    cache_dir: Path,
+    aws_profile: str | None,
+    refresh: bool = False,
+    yarn_log_shipper_uri: str | None = None,
+) -> Path:
+    """Materialize ResourceManager/NodeManager logs, preferring a log shipper.
+
+    Use yarn_log_shipper_uri when a log shipper uploads ResourceManager logs
+    faster than the EMR log archive. When it contains no ResourceManager
+    logs, the EMR log URI is used instead.
+    """
+    if yarn_log_shipper_uri:
+        try:
+            return materialize_emr_logs(
+                yarn_log_shipper_uri,
+                cache_dir,
+                aws_profile,
+                refresh=refresh,
+                markers=("hadoop-yarn-resourcemanager",),
+            )
+        except (ValueError, FileNotFoundError):
+            pass
+    return materialize_emr_logs(emr_log_uri, cache_dir, aws_profile, refresh=refresh)
 
 
 def aws_command(aws_profile: str | None, aws_region: str | None = None) -> list[str]:
@@ -1962,6 +1980,15 @@ def parse_args() -> argparse.Namespace:
         help="Refresh cached ResourceManager and NodeManager logs from S3",
     )
     parser.add_argument(
+        "--yarn-log-shipper-uri",
+        help=(
+            "Optional S3 prefix holding this cluster's ResourceManager logs from a "
+            "log shipper. Use this when the shipper uploads faster than the EMR log "
+            "archive; falls back to the resolved EMR log URI when it contains no "
+            "ResourceManager logs."
+        ),
+    )
+    parser.add_argument(
         "--aws-profile",
         default=DEFAULT_AWS_PROFILE,
         help="AWS CLI profile; omit to use the standard credential chain",
@@ -2014,11 +2041,12 @@ def main() -> int:
         cluster_id = next(iter(cluster_ids))
         emr_log_uri = resolve_emr_log_uri(cluster_id, args.aws_profile, args.aws_region)
 
-    local_logs = materialize_emr_logs(
+    local_logs = materialize_yarn_logs(
         emr_log_uri,
         args.cache_dir,
         args.aws_profile,
         refresh=args.refresh_emr_log_cache,
+        yarn_log_shipper_uri=args.yarn_log_shipper_uri,
     )
     evidence = parse_yarn_logs(local_logs)
     mode = calculator_mode(evidence.calculator_class)

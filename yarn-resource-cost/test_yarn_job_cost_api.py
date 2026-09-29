@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -114,6 +115,46 @@ class YarnJobCostApiTest(unittest.TestCase):
         self.assertTrue(result.retryable)
         self.assertIsNone(result.vcore_seconds)
         self.assertIn("No archived", result.warnings[0])
+
+    def test_shipped_resourcemanager_logs_are_preferred(self):
+        s3 = FakeS3Client(
+            {
+                "yarn-rm-logs/j-TEST/ip-10-0-0-1/"
+                "hadoop-yarn-resourcemanager-20260928-120000-a.log": self.yarn_log_with_instance_type().encode(),
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": b"not a yarn log",
+            }
+        )
+        request = replace(self.request(), yarn_log_uri="s3://test-bucket/yarn-rm-logs/j-TEST/")
+
+        with mock.patch.object(FakeEmrClient, "describe_cluster") as describe_cluster:
+            result = calculate_emr_application_usage(
+                request, emr_client=FakeEmrClient(), s3_client=s3
+            )
+
+        describe_cluster.assert_not_called()
+        self.assertTrue(result.complete)
+        self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+
+    def test_empty_shipped_log_prefix_falls_back_to_cluster_log_uri(self):
+        s3 = FakeS3Client(
+            {
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": self.yarn_log_with_instance_type().encode()
+            }
+        )
+        request = replace(self.request(), yarn_log_uri="s3://test-bucket/yarn-rm-logs/j-TEST/")
+
+        result = calculate_emr_application_usage(
+            request, emr_client=FakeEmrClient(), s3_client=s3
+        )
+
+        self.assertTrue(result.complete)
+        self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+
+    def test_request_rejects_non_s3_yarn_log_uri(self):
+        with self.assertRaisesRegex(ValueError, "Expected an S3 URI"):
+            replace(self.request(), yarn_log_uri="/var/log/hadoop-yarn")
 
     def test_missing_calculator_evidence_is_retryable(self):
         log = "\n".join(
