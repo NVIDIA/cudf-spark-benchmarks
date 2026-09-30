@@ -2124,6 +2124,7 @@ def main() -> int:
             "local_event_metadata_path": str(local_event_path) if local_event_path else "",
             "emr_cluster_id": cluster_id,
             "emr_log_uri": emr_log_uri,
+            "yarn_log_shipper_uri": args.yarn_log_shipper_uri or "",
             "local_log_path": str(local_logs),
             "resource_calculator": mode,
             "detected_resource_calculator_class": evidence.calculator_class,
