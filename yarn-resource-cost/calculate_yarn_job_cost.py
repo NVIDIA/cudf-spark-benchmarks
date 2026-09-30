@@ -2125,6 +2125,7 @@ def main() -> int:
             "emr_cluster_id": cluster_id,
             "emr_log_uri": emr_log_uri,
             "yarn_log_shipper_uri": args.yarn_log_shipper_uri or "",
+            "resolved_yarn_log_uri": resolved_yarn_log_uri,
             "local_log_path": str(local_logs),
             "resource_calculator": mode,
             "detected_resource_calculator_class": evidence.calculator_class,
