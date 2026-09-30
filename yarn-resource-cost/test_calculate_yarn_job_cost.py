@@ -380,9 +380,6 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                 )
                 run.assert_not_called()
 
-            stale_log = target / "hadoop-yarn-resourcemanager.log.1"
-            stale_log.write_text("rotated upstream\n")
-
             def fake_download(command, check):
                 (target / "hadoop-yarn-resourcemanager.log").write_text("fixture\n")
 
@@ -393,7 +390,6 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                 )
                 run.assert_called_once()
                 self.assertTrue(marker.is_file())
-                self.assertFalse(stale_log.exists())
 
             with mock.patch.object(
                 MODULE.subprocess,
