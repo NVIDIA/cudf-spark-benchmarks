@@ -2018,6 +2018,10 @@ def parse_args() -> argparse.Namespace:
         default=Path(".cache/yarn-job-cost/event-metadata"),
     )
     args = parser.parse_args()
+    if args.yarn_log_shipper_uri is not None and not args.yarn_log_shipper_uri.startswith(
+        ("s3://", "s3a://", "s3n://")
+    ):
+        parser.error("--yarn-log-shipper-uri must be an S3 URI")
     args.emr_log_uri = args.yarn_log_root
     return args
 

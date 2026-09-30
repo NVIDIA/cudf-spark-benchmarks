@@ -433,6 +433,12 @@ class CalculateYarnJobCostTest(unittest.TestCase):
             )
         emr_resolver.assert_called_once()
 
+    def test_cli_rejects_non_s3_yarn_log_shipper_uri(self):
+        argv = [str(SCRIPT), "--event-log-root", "s3://bucket/run", "--yarn-log-shipper-uri", "/var/log"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                MODULE.parse_args()
+
     def test_dominant_resource_cost_includes_gpu_share(self):
         assignment = MODULE.RM_ASSIGN_RE.search(
             "2026-07-24 23:39:05,028 INFO X: Assigned container "

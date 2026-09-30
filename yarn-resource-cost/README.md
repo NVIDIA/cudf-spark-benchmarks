@@ -77,7 +77,8 @@ archive by default, which the EMR log pusher updates about every five minutes.
 Set `yarn_log_uri` to an S3 prefix holding this cluster's ResourceManager logs
 when a log shipper uploads them sooner. Only file names containing
 `hadoop-yarn-resourcemanager` are read from that prefix; when none exist yet,
-the `LogUri` archive is used instead.
+the `LogUri` archive is used instead. The `calculate_yarn_job_cost.py` CLI
+accepts the same prefix as `--yarn-log-shipper-uri`.
 
 `event_log_uri` accepts an S3 URI, a plain local path, or a local `file://` URI.
 Passing a pre-materialized local file or rolling-event-log directory avoids an
