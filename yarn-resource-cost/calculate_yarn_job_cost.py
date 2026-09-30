@@ -551,8 +551,10 @@ def materialize_yarn_logs(
     aws_profile: str | None,
     refresh: bool = False,
     yarn_log_shipper_uri: str | None = None,
-) -> Path:
+) -> tuple[Path, str]:
     """Materialize ResourceManager/NodeManager logs, preferring a log shipper.
+
+    Returns the local log path and the S3 URI the logs were read from.
 
     Use yarn_log_shipper_uri when a log shipper uploads ResourceManager logs
     faster than the EMR log archive. When it contains no ResourceManager
@@ -562,18 +564,19 @@ def materialize_yarn_logs(
     """
     if yarn_log_shipper_uri:
         try:
-            return materialize_emr_logs(
+            local_logs = materialize_emr_logs(
                 yarn_log_shipper_uri,
                 cache_dir,
                 aws_profile,
                 refresh=True,
                 markers=("hadoop-yarn-resourcemanager",),
             )
+            return local_logs, yarn_log_shipper_uri
         except (ValueError, FileNotFoundError):
             pass
     if callable(emr_log_uri):
         emr_log_uri = emr_log_uri()
-    return materialize_emr_logs(emr_log_uri, cache_dir, aws_profile, refresh=refresh)
+    return materialize_emr_logs(emr_log_uri, cache_dir, aws_profile, refresh=refresh), emr_log_uri
 
 
 def aws_command(aws_profile: str | None, aws_region: str | None = None) -> list[str]:
@@ -2060,7 +2063,7 @@ def main() -> int:
     else:
         log_source = emr_log_uri
 
-    local_logs = materialize_yarn_logs(
+    local_logs, resolved_yarn_log_uri = materialize_yarn_logs(
         log_source,
         args.cache_dir,
         args.aws_profile,
