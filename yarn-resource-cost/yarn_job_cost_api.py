@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import sqlite3
@@ -18,6 +20,7 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 import calculate_yarn_job_cost as reporting
+from yarn_job_cost_checkpoint import EventCheckpoints
 from yarn_job_cost_core import calculator_mode, parse_yarn_logs
 from yarn_job_cost_discovery import read_event_log_metadata
 from yarn_job_cost_index import ArchivePendingError, materialize_application_logs
@@ -121,9 +124,11 @@ def _download_objects(
     objects: Iterable[dict[str, Any]],
     destination: Path,
     check_budget=lambda: None,
+    cache_dir: Path | None = None,
 ) -> list[Path]:
     started = time.monotonic()
     transferred = 0
+    reused = 0
     downloaded = []
     for item in objects:
         check_budget()
@@ -132,6 +137,27 @@ def _download_objects(
             continue
         target = destination / _safe_relative_key(key, prefix)
         target.parent.mkdir(parents=True, exist_ok=True)
+        blob = None
+        if cache_dir is not None and item.get("ETag"):
+            identity = json.dumps(
+                [
+                    bucket,
+                    key,
+                    item["ETag"],
+                    item.get("Size"),
+                    str(item.get("LastModified", "")),
+                ]
+            )
+            blob_dir = cache_dir / "event-objects-v1"
+            blob_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            blob = blob_dir / hashlib.sha256(identity.encode()).hexdigest()
+            if blob.is_file() and (
+                item.get("Size") is None or blob.stat().st_size == item["Size"]
+            ):
+                target.symlink_to(blob.resolve())
+                downloaded.append(target)
+                reused += 1
+                continue
         condition = {"IfMatch": item["ETag"]} if item.get("ETag") else {}
         try:
             body = s3_client.get_object(Bucket=bucket, Key=key, **condition)["Body"]
@@ -149,20 +175,34 @@ def _download_objects(
                     "Archive changed after listing; retry this snapshot"
                 ) from error
             raise
+        temporary = None
         try:
-            with target.open("wb") as output:
+            if blob is not None:
+                # Publish complete objects independently of metadata parsing.
+                # Temporary files live beside the blob for atomic replacement.
+                output = tempfile.NamedTemporaryFile(dir=blob.parent, delete=False)
+                temporary = Path(output.name)
+            else:
+                output = target.open("wb")
+            with output:
                 while chunk := body.read(1024 * 1024):
                     check_budget()
                     output.write(chunk)
                     transferred += len(chunk)
+            if blob is not None:
+                temporary.replace(blob)
+                target.symlink_to(blob.resolve())
         finally:
             close = getattr(body, "close", None)
             if close:
                 close()
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         downloaded.append(target)
     logger.info(
-        "event=yarn_archive_download objects=%d bytes=%d duration_seconds=%.3f",
-        len(downloaded),
+        "event=yarn_archive_download objects=%d reused=%d bytes=%d duration_seconds=%.3f",
+        len(downloaded) - reused,
+        reused,
         transferred,
         time.monotonic() - started,
     )
@@ -170,7 +210,11 @@ def _download_objects(
 
 
 def _materialize_event_log(
-    s3_client: Any, uri: str, destination: Path, check_budget=lambda: None
+    s3_client: Any,
+    uri: str,
+    destination: Path,
+    check_budget=lambda: None,
+    cache_dir: Path | None = None,
 ) -> Path:
     if not uri.startswith(("s3://", "s3a://", "s3n://")):
         if uri.lower().startswith("file:"):
@@ -202,7 +246,13 @@ def _materialize_event_log(
     )
     if exact_object is not None:
         downloaded = _download_objects(
-            s3_client, bucket, prefix, (exact_object,), destination, check_budget
+            s3_client,
+            bucket,
+            prefix,
+            (exact_object,),
+            destination,
+            check_budget,
+            cache_dir,
         )
         return downloaded[0] if downloaded else destination
     selected = [
@@ -220,7 +270,7 @@ def _materialize_event_log(
         else destination
     )
     _download_objects(
-        s3_client, bucket, prefix, selected, event_destination, check_budget
+        s3_client, bucket, prefix, selected, event_destination, check_budget, cache_dir
     )
     return destination
 
@@ -340,10 +390,11 @@ def _calculate_emr_application_usage(
 ):
     with tempfile.TemporaryDirectory(prefix="yarn-resource-cost-") as directory:
         root = Path(directory)
+        event_cache = Path(cache_dir) if cache_dir is not None else None
         metadata = None
         if not request.rm_only:
             metadata = _read_application_metadata(
-                request, s3_client, root, check_budget
+                request, s3_client, root, check_budget, event_cache
             )
             if isinstance(metadata, YarnApplicationUsageResult):
                 return metadata
@@ -428,7 +479,7 @@ def _calculate_emr_application_usage(
 
         if metadata is None:
             metadata = _read_application_metadata(
-                request, s3_client, root, check_budget
+                request, s3_client, root, check_budget, event_cache
             )
             if isinstance(metadata, YarnApplicationUsageResult):
                 return metadata
@@ -499,21 +550,28 @@ def _calculate_emr_application_usage(
         )
 
 
-def _read_application_metadata(request, s3_client, root, check_budget):
+def _read_application_metadata(request, s3_client, root, check_budget, cache_dir=None):
     started = time.monotonic()
     event_root = _materialize_event_log(
-        s3_client, request.event_log_uri, root / "events", check_budget
+        s3_client, request.event_log_uri, root / "events", check_budget, cache_dir
     )
     logger.info(
         "event=yarn_eventlog_materialize duration_seconds=%.3f",
         time.monotonic() - started,
     )
     started = time.monotonic()
-    metadata = read_event_log_metadata(event_root, check_budget=check_budget).get(
-        request.application_id
+    checkpoints = (
+        EventCheckpoints(cache_dir, request.event_log_uri)
+        if cache_dir is not None
+        else None
     )
+    metadata = read_event_log_metadata(
+        event_root, check_budget=check_budget, checkpoints=checkpoints
+    ).get(request.application_id)
     logger.info(
-        "event=yarn_eventlog_parse duration_seconds=%.3f", time.monotonic() - started
+        "event=yarn_eventlog_parse checkpoint_hits=%d duration_seconds=%.3f",
+        checkpoints.hits if checkpoints else 0,
+        time.monotonic() - started,
     )
     if metadata is None:
         return _empty_result(

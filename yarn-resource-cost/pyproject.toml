@@ -28,6 +28,7 @@ py-modules = [
   "calculate_yarn_job_cost",
   "yarn_job_cost_adapters",
   "yarn_job_cost_api",
+  "yarn_job_cost_checkpoint",
   "yarn_job_cost_core",
   "yarn_job_cost_dataproc",
   "yarn_job_cost_defaults",

@@ -95,6 +95,14 @@ Set `rm_only=True` on `EmrApplicationUsageRequest` and pass a persistent
   ETag, size, and modification time. ETags are opaque identities. Downloads use
   conditional GETs; replacements commit atomically per object. Deleted objects
   are removed from the current snapshot. Objects without ETags are not reused.
+- Never-indexed RM objects are processed before refreshing previously indexed
+  objects, so a growing active log cannot repeatedly displace cold archive work.
+- With `cache_dir`, complete S3 Spark event-log objects are published atomically
+  to an identity-keyed cache. Parsing checkpoints retain successful whole-segment
+  metadata before final validation. A changed segment invalidates all subsequent
+  checkpoints; failed reads are never checkpointed. Local files also support
+  parsing checkpoints, identified by device, inode, size, and nanosecond mtime.
+  Do not mutate local input files while accounting is running.
 - Timeouts, concurrent index refresh conflicts, S3 replacement/deletion races,
   and unreadable compressed RM archives return retryable pending evidence, never
   complete results from a partial refresh. Completed objects survive retries.
@@ -104,7 +112,10 @@ cooperative processing budget, **not a hard wall-clock deadline**: it cannot
 interrupt an in-flight SDK request or decompression operation. Configure bounded
 connect/read timeouts and retries on the injected clients. A single object must
 fit within the budget to be indexed; use smaller rolled logs or a larger budget
-if cold attempts repeatedly stop on the same object.
+if cold attempts repeatedly stop on the same object. Spark event-log downloads
+and parsing checkpoint separately: each download and each segment's parsing
+must individually fit the budget, but their aggregate need not fit one attempt.
+Resume requires the same persistent `cache_dir`; without it attempts are stateless.
 
 The index requires a private local filesystem with SQLite locking; do not share
 it through object storage or a network filesystem. Multiple local processes may
@@ -112,6 +123,8 @@ use it; lock contention returns pending after a short wait. It stores normalized
 log evidence, with owner-only permissions on newly created databases/directories.
 SQLite uses WAL with NORMAL synchronization: transactions remain atomic, but
 host power loss can discard recent cache commits and cause extra downloads.
+The cache also retains full Spark event-log objects and JSON metadata checkpoints,
+which can require substantially more space than the RM index alone.
 It is not an authoritative accounting store. No cross-source TTL or size-based
 eviction is performed: provision a quota/monitor disk usage, and remove obsolete
 source indexes only when their callers are stopped. Removing an index is safe

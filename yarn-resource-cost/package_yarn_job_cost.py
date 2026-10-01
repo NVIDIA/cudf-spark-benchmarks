@@ -25,6 +25,7 @@ PACKAGE_SOURCES = {
     PROJECT_DIR / "pyproject.toml": "pyproject.toml",
     PROJECT_DIR / "yarn_resource_cost.py": "yarn_resource_cost.py",
     PROJECT_DIR / "yarn_job_cost_api.py": "yarn_job_cost_api.py",
+    PROJECT_DIR / "yarn_job_cost_checkpoint.py": "yarn_job_cost_checkpoint.py",
     PROJECT_DIR / "yarn_job_cost_core.py": "yarn_job_cost_core.py",
     PROJECT_DIR / "yarn_job_cost_adapters.py": "yarn_job_cost_adapters.py",
     PROJECT_DIR / "yarn_job_cost_dataproc.py": "yarn_job_cost_dataproc.py",

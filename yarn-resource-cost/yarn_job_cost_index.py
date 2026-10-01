@@ -90,7 +90,10 @@ def materialize_application_logs(
             "CREATE INDEX IF NOT EXISTS records_key ON records(key);"
         )
         expected = {}
-        for item in objects:
+        known = dict(connection.execute("SELECT key, fingerprint FROM objects"))
+        # Finish cold objects before spending another attempt on a growing log
+        # that was already indexed. Selection still uses the complete snapshot.
+        for item in sorted(objects, key=lambda item: str(item["Key"]) in known):
             check_budget()
             key = str(item["Key"])
             # No stable identity means no reuse, even for size-preserving writes.
