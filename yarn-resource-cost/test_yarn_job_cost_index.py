@@ -24,6 +24,7 @@ class VersionedS3(FakeS3Client):
         super().__init__(objects)
         self.reads = []
         self.prefixes = []
+        self.conditional_reads = []
 
     def get_paginator(self, operation):
         assert operation == "list_objects_v2"
@@ -45,7 +46,9 @@ class VersionedS3(FakeS3Client):
 
     def get_object(self, **kwargs):
         key = kwargs["Key"]
-        assert kwargs["IfMatch"] == hashlib.sha256(self.objects[key]).hexdigest()
+        if "IfMatch" in kwargs:
+            assert kwargs["IfMatch"] == hashlib.sha256(self.objects[key]).hexdigest()
+        self.conditional_reads.append("IfMatch" in kwargs)
         self.reads.append(key)
         return super().get_object(**kwargs)
 
@@ -72,6 +75,7 @@ def test_rm_only_skips_nm_and_reuses_index(tmp_path, sample):
     assert first.complete
     assert calculate(request, s3, tmp_path) == first
     assert s3.reads == [KEY]
+    assert s3.conditional_reads == [True]
     assert not list(tmp_path.rglob("*.log"))
 
 

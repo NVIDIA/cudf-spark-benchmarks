@@ -146,7 +146,15 @@ def _download_objects(
     destination: Path,
     check_budget=lambda: None,
     cache_dir: Path | None = None,
+    require_listed_version: bool = True,
 ) -> list[Path]:
+    """Download objects, optionally requiring the version observed by listing.
+
+    Indexed RM and event-log reads need the listed ETag and size to remain stable.
+    Legacy YARN archive reads intentionally accept a newer object: they scan the
+    whole cluster without checkpoints, so a changing log must not restart every
+    attempt. Those reads still verify the GET response's own ContentLength.
+    """
     started = time.monotonic()
     transferred = 0
     reused = 0
@@ -158,8 +166,10 @@ def _download_objects(
             continue
         target = destination / _safe_relative_key(key, prefix)
         target.parent.mkdir(parents=True, exist_ok=True)
-        blob = None
+        cached_object = None
         if cache_dir is not None and item.get("ETag"):
+            # Reuse only a complete event-log object with the same listed
+            # identity; publish new downloads atomically after verification.
             identity = json.dumps(
                 [
                     bucket,
@@ -169,19 +179,26 @@ def _download_objects(
                     str(item.get("LastModified", "")),
                 ]
             )
-            blob_dir = cache_dir / "event-objects-v1"
-            blob_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            blob = blob_dir / hashlib.sha256(identity.encode()).hexdigest()
-            if blob.is_file() and (
-                item.get("Size") is None or blob.stat().st_size == item["Size"]
+            object_cache_dir = cache_dir / "event-objects-v1"
+            object_cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            cached_object = (
+                object_cache_dir / hashlib.sha256(identity.encode()).hexdigest()
+            )
+            if cached_object.is_file() and (
+                item.get("Size") is None or cached_object.stat().st_size == item["Size"]
             ):
-                target.symlink_to(blob.resolve())
+                target.symlink_to(cached_object.resolve())
                 downloaded.append(target)
                 reused += 1
                 continue
-        condition = {"IfMatch": item["ETag"]} if item.get("ETag") else {}
+        condition = (
+            {"IfMatch": item["ETag"]}
+            if require_listed_version and item.get("ETag")
+            else {}
+        )
         try:
-            body = s3_client.get_object(Bucket=bucket, Key=key, **condition)["Body"]
+            response = s3_client.get_object(Bucket=bucket, Key=key, **condition)
+            body = response["Body"]
         except Exception as error:
             # Keep boto3 optional: only recognize the documented S3 race codes;
             # authentication and other transport/provider failures still escape.
@@ -198,10 +215,12 @@ def _download_objects(
             raise
         temporary = None
         try:
-            if blob is not None:
+            if cached_object is not None:
                 # Publish complete objects independently of metadata parsing.
-                # Temporary files live beside the blob for atomic replacement.
-                output = tempfile.NamedTemporaryFile(dir=blob.parent, delete=False)
+                # Temporary files live beside the cached object for atomic replacement.
+                output = tempfile.NamedTemporaryFile(
+                    dir=cached_object.parent, delete=False
+                )
                 temporary = Path(output.name)
             else:
                 output = target.open("wb")
@@ -212,13 +231,18 @@ def _download_objects(
                     output.write(chunk)
                     written += len(chunk)
                     transferred += len(chunk)
-            if item.get("Size") is not None and written != item["Size"]:
+            expected_size = (
+                item.get("Size")
+                if require_listed_version
+                else response.get("ContentLength")
+            )
+            if expected_size is not None and written != expected_size:
                 raise ArchivePendingError(
-                    "Archive download length differs from the listed object; retry this snapshot"
+                    "Archive download length differs from the expected object size; retry this snapshot"
                 )
-            if blob is not None:
-                temporary.replace(blob)
-                target.symlink_to(blob.resolve())
+            if cached_object is not None:
+                temporary.replace(cached_object)
+                target.symlink_to(cached_object.resolve())
         finally:
             close = getattr(body, "close", None)
             if close:
@@ -336,7 +360,13 @@ def _download_yarn_logs(
             objects.append(item)
     check_budget()
     return _download_objects(
-        s3_client, bucket, prefix, objects, destination, check_budget
+        s3_client,
+        bucket,
+        prefix,
+        objects,
+        destination,
+        check_budget,
+        require_listed_version=False,
     )
 
 
@@ -396,19 +426,21 @@ def calculate_emr_application_usage(
     results. Provider authentication and transport errors are allowed to propagate.
     """
 
-    budget = request.timeout_seconds
-    if budget is None and request.rm_only:
-        budget = 120.0
-    deadline = time.monotonic() + budget if budget is not None else None
+    timeout_seconds = request.timeout_seconds
+    if timeout_seconds is None and request.rm_only:
+        timeout_seconds = 120.0
+    deadline = (
+        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    )
 
-    def check_budget():
+    def check_timeout():
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("YARN accounting attempt exceeded its time budget")
 
     try:
-        check_budget()
+        check_timeout()
         return _calculate_emr_application_usage(
-            request, emr_client, s3_client, cache_dir, check_budget
+            request, emr_client, s3_client, cache_dir, check_timeout
         )
     except (TimeoutError, sqlite3.OperationalError, ArchivePendingError) as error:
         if isinstance(error, sqlite3.OperationalError):
