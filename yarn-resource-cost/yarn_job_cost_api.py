@@ -153,7 +153,7 @@ def _download_objects(
     Indexed RM and event-log reads need the listed ETag and size to remain stable.
     Legacy YARN archive reads intentionally accept a newer object: they scan the
     whole cluster without checkpoints, so a changing log must not restart every
-    attempt. Those reads still verify the GET response's own ContentLength.
+    attempt. Those reads verify the GET response's own ContentLength when available.
     """
     started = time.monotonic()
     transferred = 0
@@ -231,11 +231,13 @@ def _download_objects(
                     output.write(chunk)
                     written += len(chunk)
                     transferred += len(chunk)
-            expected_size = (
-                item.get("Size")
-                if require_listed_version
-                else response.get("ContentLength")
-            )
+            expected_size = item.get("Size")
+            if not require_listed_version:
+                # Boto3 supplies ContentLength. Preserve short-read detection
+                # for injected clients that provide only the listing size.
+                expected_size = response.get("ContentLength")
+                if expected_size is None:
+                    expected_size = item.get("Size")
             if expected_size is not None and written != expected_size:
                 raise ArchivePendingError(
                     "Archive download length differs from the expected object size; retry this snapshot"

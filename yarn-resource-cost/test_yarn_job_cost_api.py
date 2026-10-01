@@ -160,20 +160,29 @@ class YarnJobCostApiTest(unittest.TestCase):
         )
 
         class ShortReadS3(FakeS3Client):
+            def __init__(self, objects, include_content_length):
+                super().__init__(objects)
+                self.include_content_length = include_content_length
+
             def get_object(self, **kwargs):
                 content = self.objects[kwargs["Key"]]
-                return {
-                    "Body": io.BytesIO(content[:-1]),
-                    "ContentLength": len(content),
-                }
+                response = {"Body": io.BytesIO(content[:-1])}
+                if self.include_content_length:
+                    response["ContentLength"] = len(content)
+                return response
 
-        s3 = ShortReadS3({key: self.yarn_log_with_instance_type().encode()})
-        result = calculate_emr_application_usage(
-            self.request(), emr_client=FakeEmrClient(), s3_client=s3
-        )
-        self.assertFalse(result.complete)
-        self.assertTrue(result.retryable)
-        self.assertIn("download length differs", result.warnings[0])
+        for include_content_length in (False, True):
+            with self.subTest(include_content_length=include_content_length):
+                s3 = ShortReadS3(
+                    {key: self.yarn_log_with_instance_type().encode()},
+                    include_content_length,
+                )
+                result = calculate_emr_application_usage(
+                    self.request(), emr_client=FakeEmrClient(), s3_client=s3
+                )
+                self.assertFalse(result.complete)
+                self.assertTrue(result.retryable)
+                self.assertIn("download length differs", result.warnings[0])
 
     def test_missing_archived_logs_is_retryable(self):
         result = calculate_emr_application_usage(
