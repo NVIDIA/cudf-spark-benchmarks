@@ -88,8 +88,13 @@ Set `rm_only=True` on `EmrApplicationUsageRequest` and pass a persistent
 - Only RM objects are downloaded. An explicit `yarn_log_uri` is authoritative:
   missing uploads return retryable pending evidence, with no fallback to EMR/NM
   archives. Without it, RM objects are selected from the cluster's `LogUri`.
-- The Spark event log is not read until the target application's RM summary is
-  available. Only the target application's indexed records and historical
+- The Spark event log is not read until an attempt has observed the target
+  application's RM summary. A source/application-scoped scheduling hint then
+  gives event downloads and parsing priority on subsequent attempts, so repeated
+  active-RM refreshes cannot starve their checkpoints. The hint is not evidence:
+  every complete result still refreshes and validates the current RM snapshot.
+  A missing RM archive still returns pending before reading event logs.
+  Only the target application's indexed records and historical
   scheduler/node metadata are passed to the accounting parser.
 - A disposable SQLite index per bucket/prefix reuses objects with unchanged
   ETag, size, and modification time. ETags are opaque identities. Downloads use
@@ -116,6 +121,10 @@ if cold attempts repeatedly stop on the same object. Spark event-log downloads
 and parsing checkpoint separately: each download and each segment's parsing
 must individually fit the budget, but their aggregate need not fit one attempt.
 Resume requires the same persistent `cache_dir`; without it attempts are stateless.
+Once event metadata is warm, the current mutable RM snapshot plus listing and
+warm-cache lookup overhead must still fit one attempt. Multiple changing RM
+objects whose combined refresh exceeds the budget require smaller rolled logs
+or a larger budget; per-object caching cannot make that snapshot converge.
 
 The index requires a private local filesystem with SQLite locking; do not share
 it through object storage or a network filesystem. Multiple local processes may

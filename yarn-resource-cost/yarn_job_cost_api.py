@@ -392,6 +392,7 @@ def _calculate_emr_application_usage(
         root = Path(directory)
         event_cache = Path(cache_dir) if cache_dir is not None else None
         metadata = None
+        event_priority = None
         if not request.rm_only:
             metadata = _read_application_metadata(
                 request, s3_client, root, check_budget, event_cache
@@ -420,6 +421,32 @@ def _calculate_emr_application_usage(
                 return _empty_result(
                     request, "No archived ResourceManager logs found", retryable=True
                 )
+
+            if event_cache is not None:
+                identity = json.dumps(
+                    [
+                        bucket,
+                        prefix,
+                        request.cluster_id,
+                        request.application_id,
+                        request.event_log_uri,
+                        request.region,
+                    ]
+                )
+                event_priority = (
+                    event_cache
+                    / "event-priority-v1"
+                    / hashlib.sha256(identity.encode()).hexdigest()
+                )
+                if event_priority.is_file():
+                    # Once an earlier attempt observed the target summary, give
+                    # event checkpoints the first processing slice. Otherwise a
+                    # changing RM log can consume that slice on every retry.
+                    metadata = _read_application_metadata(
+                        request, s3_client, root, check_budget, event_cache
+                    )
+                    if isinstance(metadata, YarnApplicationUsageResult):
+                        return metadata
 
             def download(item):
                 return _download_objects(
@@ -478,6 +505,12 @@ def _calculate_emr_application_usage(
             )
 
         if metadata is None:
+            if event_priority is not None:
+                # Scheduling hint only: every successful attempt still refreshes
+                # RM evidence and checks its summary above. No cached evidence
+                # is made authoritative by this marker, even if it becomes stale.
+                event_priority.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                event_priority.touch(mode=0o600, exist_ok=True)
             metadata = _read_application_metadata(
                 request, s3_client, root, check_budget, event_cache
             )

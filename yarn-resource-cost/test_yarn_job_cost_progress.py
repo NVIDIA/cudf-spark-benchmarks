@@ -9,6 +9,7 @@ import tarfile
 from dataclasses import replace
 from unittest.mock import patch
 
+import pytest
 import test_yarn_job_cost_api as fixtures
 import yarn_job_cost_api as api
 import yarn_job_cost_discovery as discovery
@@ -114,6 +115,79 @@ def test_new_rm_objects_progress_ahead_of_changing_active_log(tmp_path):
             result = calculate(request, s3, tmp_path)
             assert result.complete == (attempt == 2)
     assert s3.reads == [KEY, rolled, rolled, KEY, KEY]
+
+
+@pytest.mark.parametrize("slow_stage", ["download", "parse"])
+def test_event_progress_is_not_starved_by_recurring_rm_work(tmp_path, slow_stage):
+    request, objects = event_fixture()
+    rm_body = objects[KEY]
+    clock = [0]
+    s3 = DelayedS3(
+        objects,
+        clock,
+        lambda key: 70 if key == KEY else (60 if slow_stage == "download" else 0),
+    )
+    original = discovery._iter_application_event_lines
+
+    def parse(stream, codec, member, application):
+        if slow_stage == "parse":
+            clock[0] += 60
+        yield from original(stream, codec, member, application)
+
+    with patch.object(
+        api.time, "monotonic", side_effect=lambda: clock[0]
+    ), patch.object(discovery, "_iter_application_event_lines", parse):
+        for attempt in range(8):
+            # Other applications keep the RM source changing after ours ends.
+            s3.objects[KEY] = rm_body + f"unrelated activity {attempt}\n".encode()
+            result = calculate(request, s3, tmp_path)
+            if result.complete:
+                break
+            assert result.retryable
+        assert result.complete
+    assert result == calculate(
+        replace(request, rm_only=False), VersionedS3(objects), None
+    )
+
+
+def test_event_priority_does_not_make_old_rm_evidence_authoritative(tmp_path):
+    request, objects = event_fixture()
+    s3 = VersionedS3(objects)
+    assert calculate(request, s3, tmp_path).complete
+    # The scheduling hint survives a replacement that removes the summary.
+    s3.objects[KEY] = b"".join(objects[KEY].splitlines(keepends=True)[:-1])
+    result = calculate(request, s3, tmp_path)
+    assert not result.complete and result.retryable
+    assert result.warnings == ("ResourceManager ApplicationSummary is missing",)
+    # Even a warm hint cannot bypass the cheap no-RM gate.
+    del s3.objects[KEY]
+    with patch.object(
+        api, "_read_application_metadata", side_effect=AssertionError("event read")
+    ):
+        result = calculate(request, s3, tmp_path)
+    assert not result.complete and result.retryable
+
+
+@pytest.mark.parametrize(
+    "changed", ["application_id", "event_log_uri", "yarn_log_uri", "cluster_id"]
+)
+def test_event_priority_is_scoped_to_source_and_application(tmp_path, changed):
+    request, objects = event_fixture()
+    s3 = VersionedS3(objects)
+    assert calculate(request, s3, tmp_path).complete
+    s3.objects[KEY] = b"no summary\n"
+    values = {
+        "application_id": "application_1_9999",
+        "event_log_uri": request.event_log_uri + "-other",
+        "yarn_log_uri": "s3://test-bucket/other/",
+        "cluster_id": "j-OTHER",
+    }
+    s3.objects["other/hadoop-yarn-resourcemanager.log"] = b"no summary\n"
+    with patch.object(
+        api, "_read_application_metadata", side_effect=AssertionError("event read")
+    ):
+        result = calculate(replace(request, **{changed: values[changed]}), s3, tmp_path)
+    assert not result.complete and result.retryable
 
 
 def test_event_replacement_invalidates_successor_checkpoints(tmp_path):
