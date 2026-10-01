@@ -93,7 +93,11 @@ Set `rm_only=True` on `EmrApplicationUsageRequest` and pass a persistent
   gives event downloads and parsing priority on subsequent attempts, so repeated
   active-RM refreshes cannot starve their checkpoints. The hint is not evidence:
   every complete result still refreshes and validates the current RM snapshot.
-  A missing RM archive still returns pending before reading event logs.
+  A missing RM archive still returns pending before reading event logs. Priority
+  attempts stop that availability probe at the first RM object, then list the
+  full RM snapshot after event processing, immediately before index refresh.
+  This avoids carrying pre-event-work ETags across slow event processing while
+  preserving conditional GETs and concurrent-refresh checks.
   Only the target application's indexed records and historical
   scheduler/node metadata are passed to the accounting parser.
 - A disposable SQLite index per bucket/prefix reuses objects with unchanged

@@ -117,6 +117,21 @@ def _safe_relative_key(key: str, prefix: str) -> Path:
     return Path(*parts)
 
 
+def _list_rm_objects(s3_client, bucket, prefix, check_budget, *, first_only=False):
+    check_budget()
+    candidates = []
+    for item in _list_s3_objects(s3_client, bucket, prefix):
+        check_budget()
+        if (
+            item.get("Size") != 0
+            and "hadoop-yarn-resourcemanager" in Path(item["Key"]).name
+        ):
+            candidates.append(item)
+            if first_only:
+                break
+    return candidates
+
+
 def _download_objects(
     s3_client: Any,
     bucket: str,
@@ -402,26 +417,11 @@ def _calculate_emr_application_usage(
         # Check RM availability before reading a potentially large Spark log.
         yarn_root = root / "yarn"
         if request.rm_only:
-            candidates = []
             log_uri = request.yarn_log_uri or _cluster_log_uri(
                 emr_client, request.cluster_id
             )
             bucket, prefix = _split_s3_uri(log_uri)
             prefix = prefix.rstrip("/") + "/" if prefix else ""
-            for item in _list_s3_objects(s3_client, bucket, prefix):
-                check_budget()
-                if (
-                    item.get("Size") != 0
-                    and "hadoop-yarn-resourcemanager" in Path(item["Key"]).name
-                ):
-                    candidates.append(item)
-            if not candidates:
-                # An explicitly configured shipper is authoritative. Falling
-                # back while it is still uploading defeats cheap pending checks.
-                return _empty_result(
-                    request, "No archived ResourceManager logs found", retryable=True
-                )
-
             if event_cache is not None:
                 identity = json.dumps(
                     [
@@ -438,15 +438,35 @@ def _calculate_emr_application_usage(
                     / "event-priority-v1"
                     / hashlib.sha256(identity.encode()).hexdigest()
                 )
-                if event_priority.is_file():
-                    # Once an earlier attempt observed the target summary, give
-                    # event checkpoints the first processing slice. Otherwise a
-                    # changing RM log can consume that slice on every retry.
-                    metadata = _read_application_metadata(
-                        request, s3_client, root, check_budget, event_cache
+            prioritize_events = event_priority is not None and event_priority.is_file()
+            candidates = _list_rm_objects(
+                s3_client, bucket, prefix, check_budget, first_only=prioritize_events
+            )
+            if not candidates:
+                # An explicitly configured shipper is authoritative. Falling
+                # back while it is still uploading defeats cheap pending checks.
+                return _empty_result(
+                    request, "No archived ResourceManager logs found", retryable=True
+                )
+            if prioritize_events:
+                # Once an earlier attempt observed the target summary, give
+                # event checkpoints the first processing slice. Otherwise a
+                # changing RM log can consume that slice on every retry.
+                metadata = _read_application_metadata(
+                    request, s3_client, root, check_budget, event_cache
+                )
+                if isinstance(metadata, YarnApplicationUsageResult):
+                    return metadata
+                # The initial probe stops at the first RM object. Event work can
+                # outlast its upload interval, even with warm checkpoints; list
+                # the full current snapshot only now, just before indexing.
+                candidates = _list_rm_objects(s3_client, bucket, prefix, check_budget)
+                if not candidates:
+                    return _empty_result(
+                        request,
+                        "No archived ResourceManager logs found",
+                        retryable=True,
                     )
-                    if isinstance(metadata, YarnApplicationUsageResult):
-                        return metadata
 
             def download(item):
                 return _download_objects(

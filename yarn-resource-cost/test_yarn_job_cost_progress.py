@@ -4,6 +4,7 @@
 
 """Deterministic progress regressions: simulated time, no AWS or sleeps."""
 
+import hashlib
 import io
 import tarfile
 from dataclasses import replace
@@ -188,6 +189,121 @@ def test_event_priority_is_scoped_to_source_and_application(tmp_path, changed):
     ):
         result = calculate(replace(request, **{changed: values[changed]}), s3, tmp_path)
     assert not result.complete and result.retryable
+
+
+def test_priority_events_refresh_rm_listing_before_conditional_get(tmp_path):
+    request, objects = event_fixture()
+    rm = objects[KEY]
+    clock = [0]
+
+    class PreconditionFailed(Exception):
+        response = {"Error": {"Code": "PreconditionFailed"}}
+
+    class PeriodicS3(DelayedS3):
+        failed_gets = 0
+
+        def refresh(self):
+            # Unrelated applications overwrite the active RM object every 10s.
+            self.objects[KEY] = rm + f"activity {int(clock[0] // 10)}\n".encode()
+
+        def paginate(self, **kwargs):
+            self.refresh()
+            yield from super().paginate(**kwargs)
+
+        def get_object(self, **kwargs):
+            self.refresh()
+            if (
+                kwargs["IfMatch"]
+                != hashlib.sha256(self.objects[kwargs["Key"]]).hexdigest()
+            ):
+                self.failed_gets += 1
+                raise PreconditionFailed()
+            return super().get_object(**kwargs)
+
+    s3 = PeriodicS3(objects, clock, lambda key: 2 if key == KEY else 0)
+    original = api._read_application_metadata
+    calls = 0
+
+    def event_metadata(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Seed the normal retry path, not a previously completed run.
+            raise TimeoutError("one-time event read interruption")
+        clock[0] += 15  # event listing / checkpoint work, including warm calls
+        return original(*args, **kwargs)
+
+    with patch.object(
+        api.time, "monotonic", side_effect=lambda: clock[0]
+    ), patch.object(api, "_read_application_metadata", event_metadata):
+        assert calculate(request, s3, tmp_path).retryable
+        clock[0] += 20
+        result = calculate(request, s3, tmp_path)
+        assert result.complete
+        assert s3.failed_gets == 0
+        assert clock[0] == 39  # first RM 2s, backoff 20s, event 15s, fresh RM 2s
+    assert result == calculate(request, VersionedS3(s3.objects), None)
+
+
+@pytest.mark.parametrize("mutation", ["replace", "delete", "roll"])
+def test_rm_changes_during_priority_events_are_reconciled(tmp_path, mutation):
+    request, objects = event_fixture()
+    s3 = VersionedS3(objects)
+    original_result = calculate(request, s3, tmp_path)
+    assert original_result.complete
+    original = api._read_application_metadata
+
+    def event_metadata(*args, **kwargs):
+        metadata = original(*args, **kwargs)
+        # The old cached fingerprint still matches the pre-event listing in
+        # the roll case; only a fresh listing discovers the replacement key.
+        if mutation == "replace":
+            s3.objects[KEY] = objects[KEY].replace(b"memory:8192", b"memory:16384")
+        elif mutation == "delete":
+            del s3.objects[KEY]
+        else:
+            s3.objects[KEY + ".rolled"] = s3.objects.pop(KEY).replace(
+                b"memory:8192", b"memory:16384"
+            )
+        return metadata
+
+    with patch.object(api, "_read_application_metadata", event_metadata):
+        result = calculate(request, s3, tmp_path)
+    if mutation == "delete":
+        assert not result.complete and result.retryable
+        assert result.warnings == ("No archived ResourceManager logs found",)
+    else:
+        assert result.complete
+        assert result.instance_seconds_by_type == {"m5.xlarge": 1.0}
+    assert result == calculate(request, VersionedS3(s3.objects), None)
+
+
+def test_priority_probe_stops_early_but_refresh_lists_all_pages(tmp_path):
+    request, objects = event_fixture()
+    objects[KEY + ".rolled"] = objects[KEY]
+    objects[KEY] = b"active log\n"
+
+    class PagedS3(VersionedS3):
+        rm_pages = []
+
+        def paginate(self, **kwargs):
+            page = next(super().paginate(**kwargs))
+            if kwargs["Prefix"].startswith("events/"):
+                yield page
+                return
+            # Summary and allocations are on the last page, not the probe page.
+            for number, items in enumerate(
+                (page["Contents"][:1], [], page["Contents"][1:])
+            ):
+                self.rm_pages.append(number)
+                yield {"Contents": items}
+
+    s3 = PagedS3(objects)
+    assert calculate(request, s3, tmp_path).complete
+    assert s3.rm_pages == [0, 1, 2]
+    s3.rm_pages.clear()
+    assert calculate(request, s3, tmp_path).complete
+    assert s3.rm_pages == [0, 0, 1, 2]
 
 
 def test_event_replacement_invalidates_successor_checkpoints(tmp_path):
