@@ -281,7 +281,7 @@ def test_interrupted_sqlite_query_remains_retryable(tmp_path, sample):
         connection.set_progress_handler(lambda: 1, 1)
         with pytest.raises(sqlite3.OperationalError) as captured:
             connection.execute("SELECT 1")
-    assert captured.value.sqlite_errorcode == sqlite3.SQLITE_INTERRUPT
+    assert str(captured.value) == "interrupted"
 
     with patch.object(api, "materialize_application_logs", side_effect=captured.value):
         pending = calculate(request, s3, tmp_path)

@@ -416,11 +416,23 @@ def calculate_emr_application_usage(
             # SQLite also reports a budget-interrupted progress callback as an
             # OperationalError. Lock contention is likewise safe to retry, but
             # storage or schema failures will not be fixed by waiting for logs.
-            if not isinstance(code, int) or code & 0xFF not in {
-                sqlite3.SQLITE_BUSY,
-                sqlite3.SQLITE_LOCKED,
-                sqlite3.SQLITE_INTERRUPT,
-            }:
+            if isinstance(code, int):
+                retryable = code & 0xFF in {
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                    sqlite3.SQLITE_INTERRUPT,
+                }
+            else:
+                # Python 3.10 does not expose sqlite_errorcode. Match only
+                # SQLite's known lock/interruption messages in that runtime.
+                message = str(error).casefold()
+                retryable = message in {
+                    "database is locked",
+                    "interrupted",
+                } or message.startswith(
+                    ("database table is locked", "database schema is locked")
+                )
+            if not retryable:
                 raise
         logger.info("event=yarn_accounting_pending reason=%s", type(error).__name__)
         return _empty_result(request, str(error), retryable=True)
