@@ -95,6 +95,30 @@ class ProviderNeutralAccountingTest(unittest.TestCase):
         self.assertEqual("worker1", container.node_id)
         self.assertEqual(8192, container.node_memory_mb)
 
+    def test_nodemanager_identity_is_preserved_across_split_log_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            (log_dir / "00-start.log").write_text(
+                "2026-01-01 00:00:01,000 INFO X: Start request for "
+                "container_1_0001_01_000002 with resource "
+                "<memory:2048, vCores:2, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            (log_dir / "01-registration.log").write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker1:8041 with total resource of "
+                "<memory:8192, vCores:8, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertEqual("worker1", container.node_id)
+        self.assertEqual(8192, container.node_memory_mb)
+        self.assertEqual(8, container.node_vcores)
+        self.assertEqual(1, container.node_gpus)
+
     def test_resourcemanager_assignment_preserves_host_without_registration(self):
         with tempfile.TemporaryDirectory() as directory:
             log_dir = Path(directory) / "hadoop-yarn"
