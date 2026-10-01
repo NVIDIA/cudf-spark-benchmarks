@@ -279,6 +279,34 @@ def test_concurrent_replacement_cannot_mix_snapshots(tmp_path, sample):
     assert calculate(request, s3, tmp_path).complete
 
 
+def test_older_listing_cannot_delete_newer_indexed_object(tmp_path, sample):
+    request, log = sample
+    new_key = PREFIX + "hadoop-yarn-resourcemanager-new.log"
+
+    class ConcurrentUploadS3(VersionedS3):
+        injected = False
+
+        def paginate(self, **kwargs):
+            snapshot = list(super().paginate(**kwargs))
+            if not self.injected:
+                self.injected = True
+                self.objects[new_key] = b"unrelated activity\n"
+                assert calculate(request, self, tmp_path).complete
+            yield from snapshot
+
+    s3 = ConcurrentUploadS3({KEY: log})
+    pending = calculate(request, s3, tmp_path)
+    assert not pending.complete and pending.retryable
+    assert "RM index changed after listing" in pending.warnings[0]
+    database = next(tmp_path.glob("*.sqlite3"))
+    with sqlite3.connect(database) as connection:
+        assert {row[0] for row in connection.execute("SELECT key FROM objects")} == {
+            KEY,
+            new_key,
+        }
+    assert calculate(request, s3, tmp_path).complete
+
+
 @pytest.mark.parametrize("history_size", [1, 200])
 def test_warm_work_does_not_parse_historical_applications(
     tmp_path, sample, history_size

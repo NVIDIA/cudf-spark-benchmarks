@@ -341,6 +341,54 @@ def test_failed_event_download_never_publishes_partial_blob(tmp_path):
     assert calculate(request, s3, tmp_path).complete
 
 
+def test_silent_short_event_download_cannot_return_complete_usage(tmp_path):
+    request, objects = event_fixture()
+    event_key = next(key for key in objects if "/events_2_" in key)
+    objects[event_key] = objects[event_key].replace(
+        b"container_1_0001_01_000002", b"container_1_0001_01_000001"
+    )
+    full = calculate(request, VersionedS3(objects), tmp_path / "full")
+    assert full.complete and full.instance_seconds_by_type == {"m5.xlarge": 3.0}
+
+    s3 = VersionedS3(objects)
+    original = s3.get_object
+    short_body = objects[event_key].splitlines(keepends=True)[0]
+
+    def short_get(**kwargs):
+        response = original(**kwargs)
+        if kwargs["Key"] == event_key:
+            response["Body"] = io.BytesIO(short_body)
+        return response
+
+    cache = tmp_path / "short"
+    with patch.object(s3, "get_object", side_effect=short_get):
+        pending = calculate(request, s3, cache)
+    assert not pending.complete and pending.retryable
+    assert "download length differs" in pending.warnings[0]
+    # Segment one is complete; the short second segment must not be published.
+    assert len(list((cache / "event-objects-v1").iterdir())) == 1
+    assert calculate(request, s3, cache) == full
+
+
+def test_default_legacy_mode_does_not_inherit_rm_only_budget(tmp_path):
+    case = fixtures.YarnJobCostApiTest()
+    request = case.request()
+    log = case.yarn_log_with_instance_type().encode()
+    clock = [0]
+    s3 = DelayedS3({KEY: log}, clock, lambda _key: 130)
+    with patch.object(api.time, "monotonic", side_effect=lambda: clock[0]):
+        result = calculate(request, s3, None)
+    assert result.complete
+    assert s3.reads == [KEY]
+
+    clock[0] = 0
+    s3.reads.clear()
+    with patch.object(api.time, "monotonic", side_effect=lambda: clock[0]):
+        pending = calculate(replace(request, timeout_seconds=120), s3, None)
+    assert not pending.complete and pending.retryable
+    assert s3.reads == [KEY]
+
+
 def test_local_event_parsing_uses_segment_checkpoints(tmp_path):
     request, objects = event_fixture()
     local = tmp_path / "eventlog_v2_application_1_0001"

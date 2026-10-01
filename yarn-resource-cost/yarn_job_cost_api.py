@@ -23,7 +23,11 @@ import calculate_yarn_job_cost as reporting
 from yarn_job_cost_checkpoint import EventCheckpoints
 from yarn_job_cost_core import calculator_mode, parse_yarn_logs
 from yarn_job_cost_discovery import read_event_log_metadata
-from yarn_job_cost_index import ArchivePendingError, materialize_application_logs
+from yarn_job_cost_index import (
+    ArchivePendingError,
+    materialize_application_logs,
+    read_index_generation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +49,7 @@ class EmrApplicationUsageRequest:
     archive is used instead unless rm_only is enabled.
     """
     rm_only: bool = False
-    timeout_seconds: float = 120.0
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("cluster_id", "application_id", "event_log_uri", "region"):
@@ -53,7 +57,9 @@ class EmrApplicationUsageRequest:
                 raise ValueError(f"{name} is required")
         if self.yarn_log_uri is not None:
             _split_s3_uri(self.yarn_log_uri)
-        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+        if self.timeout_seconds is not None and (
+            not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0
+        ):
             raise ValueError("timeout_seconds must be finite and positive")
 
 
@@ -199,11 +205,17 @@ def _download_objects(
                 temporary = Path(output.name)
             else:
                 output = target.open("wb")
+            written = 0
             with output:
                 while chunk := body.read(1024 * 1024):
                     check_budget()
                     output.write(chunk)
+                    written += len(chunk)
                     transferred += len(chunk)
+            if item.get("Size") is not None and written != item["Size"]:
+                raise ArchivePendingError(
+                    "Archive download length differs from the listed object; retry this snapshot"
+                )
             if blob is not None:
                 temporary.replace(blob)
                 target.symlink_to(blob.resolve())
@@ -384,10 +396,13 @@ def calculate_emr_application_usage(
     results. Provider authentication and transport errors are allowed to propagate.
     """
 
-    deadline = time.monotonic() + request.timeout_seconds
+    budget = request.timeout_seconds
+    if budget is None and request.rm_only:
+        budget = 120.0
+    deadline = time.monotonic() + budget if budget is not None else None
 
     def check_budget():
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("YARN accounting attempt exceeded its time budget")
 
     try:
@@ -422,6 +437,7 @@ def _calculate_emr_application_usage(
             )
             bucket, prefix = _split_s3_uri(log_uri)
             prefix = prefix.rstrip("/") + "/" if prefix else ""
+            index_cache = Path(cache_dir) if cache_dir is not None else root / "index"
             if event_cache is not None:
                 identity = json.dumps(
                     [
@@ -439,6 +455,11 @@ def _calculate_emr_application_usage(
                     / hashlib.sha256(identity.encode()).hexdigest()
                 )
             prioritize_events = event_priority is not None and event_priority.is_file()
+            listing_generation = (
+                read_index_generation(index_cache, bucket, prefix)
+                if not prioritize_events
+                else None
+            )
             candidates = _list_rm_objects(
                 s3_client, bucket, prefix, check_budget, first_only=prioritize_events
             )
@@ -460,6 +481,7 @@ def _calculate_emr_application_usage(
                 # The initial probe stops at the first RM object. Event work can
                 # outlast its upload interval, even with warm checkpoints; list
                 # the full current snapshot only now, just before indexing.
+                listing_generation = read_index_generation(index_cache, bucket, prefix)
                 candidates = _list_rm_objects(s3_client, bucket, prefix, check_budget)
                 if not candidates:
                     return _empty_result(
@@ -479,10 +501,11 @@ def _calculate_emr_application_usage(
                 prefix=prefix,
                 objects=candidates,
                 application_id=request.application_id,
-                cache_dir=Path(cache_dir) if cache_dir is not None else root / "index",
+                cache_dir=index_cache,
                 destination=yarn_root / "hadoop-yarn-resourcemanager-index.log",
                 download=download,
                 check_budget=check_budget,
+                listing_generation=listing_generation,
             )
             logger.info(
                 "event=yarn_rm_index objects=%d changed=%d reused=%d duration_seconds=%.3f",

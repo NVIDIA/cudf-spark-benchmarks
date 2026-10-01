@@ -103,12 +103,14 @@ Set `rm_only=True` on `EmrApplicationUsageRequest` and pass a persistent
 - A disposable SQLite index per bucket/prefix reuses objects with unchanged
   ETag, size, and modification time. ETags are opaque identities. Downloads use
   conditional GETs; replacements commit atomically per object. Deleted objects
-  are removed from the current snapshot. Objects without ETags are not reused.
+  are removed from the current snapshot. A generation fence rejects listings
+  older than a concurrent index update. Objects without ETags are not reused.
 - Never-indexed RM objects are processed before refreshing previously indexed
   objects, so a growing active log cannot repeatedly displace cold archive work.
 - With `cache_dir`, complete S3 Spark event-log objects are published atomically
-  to an identity-keyed cache. Parsing checkpoints retain successful whole-segment
-  metadata before final validation. A changed segment invalidates all subsequent
+  to an identity-keyed cache after validating the listed object size. Parsing
+  checkpoints retain successful whole-segment metadata before final validation.
+  A changed segment invalidates all subsequent
   checkpoints; failed reads are never checkpointed. Local files also support
   parsing checkpoints, identified by device, inode, size, and nanosecond mtime.
   Do not mutate local input files while accounting is running.
@@ -116,8 +118,10 @@ Set `rm_only=True` on `EmrApplicationUsageRequest` and pass a persistent
   and unreadable compressed RM archives return retryable pending evidence, never
   complete results from a partial refresh. Completed objects survive retries.
 
-`timeout_seconds` defaults to 120 and must be finite and positive. This is a
-cooperative processing budget, **not a hard wall-clock deadline**: it cannot
+For `rm_only=True`, an omitted `timeout_seconds` uses 120 seconds. Omitting it
+in the original `rm_only=False` path preserves unbounded processing; callers
+may set an explicit finite, positive budget for either mode. The budget is a
+cooperative processing limit, **not a hard wall-clock deadline**: it cannot
 interrupt an in-flight SDK request or decompression operation. Configure bounded
 connect/read timeouts and retries on the injected clients. A single object must
 fit within the budget to be indexed; use smaller rolled logs or a larger budget
