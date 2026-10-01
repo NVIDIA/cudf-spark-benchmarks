@@ -111,8 +111,9 @@ class YarnJobCostApiTest(unittest.TestCase):
         )
 
         class ReplacedBeforeGetS3(FakeS3Client):
-            def __init__(self, objects):
+            def __init__(self, objects, include_content_length):
                 super().__init__(objects)
+                self.include_content_length = include_content_length
                 self.get_requests = []
                 self.listings = 0
 
@@ -141,17 +142,29 @@ class YarnJobCostApiTest(unittest.TestCase):
 
                     raise PreconditionFailed()
                 content = self.objects[kwargs["Key"]]
-                return {"Body": io.BytesIO(content), "ContentLength": len(content)}
+                response = {"Body": io.BytesIO(content)}
+                if self.include_content_length:
+                    response["ContentLength"] = len(content)
+                return response
 
-        s3 = ReplacedBeforeGetS3({key: self.yarn_log_with_instance_type().encode()})
-        for _ in range(2):
-            result = calculate_emr_application_usage(
-                self.request(), emr_client=FakeEmrClient(), s3_client=s3
-            )
-            self.assertTrue(result.complete)
-            self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
-        self.assertEqual(2, s3.listings)
-        self.assertTrue(all("IfMatch" not in request for request in s3.get_requests))
+        for include_content_length in (False, True):
+            with self.subTest(include_content_length=include_content_length):
+                s3 = ReplacedBeforeGetS3(
+                    {key: self.yarn_log_with_instance_type().encode()},
+                    include_content_length,
+                )
+                for _ in range(2):
+                    result = calculate_emr_application_usage(
+                        self.request(), emr_client=FakeEmrClient(), s3_client=s3
+                    )
+                    self.assertTrue(result.complete)
+                    self.assertEqual(
+                        {"m5.xlarge": 2.0}, result.instance_seconds_by_type
+                    )
+                self.assertEqual(2, s3.listings)
+                self.assertTrue(
+                    all("IfMatch" not in request for request in s3.get_requests)
+                )
 
     def test_legacy_yarn_download_rejects_short_get_body(self):
         key = (

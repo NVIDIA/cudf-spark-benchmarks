@@ -231,14 +231,18 @@ def _download_objects(
                     output.write(chunk)
                     written += len(chunk)
                     transferred += len(chunk)
-            expected_size = item.get("Size")
-            if not require_listed_version:
-                # Boto3 supplies ContentLength. Preserve short-read detection
-                # for injected clients that provide only the listing size.
-                expected_size = response.get("ContentLength")
-                if expected_size is None:
-                    expected_size = item.get("Size")
-            if expected_size is not None and written != expected_size:
+            listed_size = item.get("Size")
+            response_size = response.get("ContentLength")
+            if require_listed_version:
+                size_mismatch = listed_size is not None and written != listed_size
+            elif response_size is not None:
+                size_mismatch = written != response_size
+            else:
+                # A Body-only injected client cannot prove the new size after
+                # a replacement. Reject definite short reads, but allow growth
+                # beyond the stale listing so the legacy path can progress.
+                size_mismatch = listed_size is not None and written < listed_size
+            if size_mismatch:
                 raise ArchivePendingError(
                     "Archive download length differs from the expected object size; retry this snapshot"
                 )
