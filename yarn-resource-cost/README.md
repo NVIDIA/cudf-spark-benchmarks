@@ -138,6 +138,9 @@ The index requires a private local filesystem with SQLite locking; do not share
 it through object storage or a network filesystem. Multiple local processes may
 use it; lock contention returns pending after a short wait. It stores normalized
 log evidence, with owner-only permissions on newly created databases/directories.
+Permanent SQLite errors, such as a full disk or invalid cache schema, propagate
+to the caller instead of being reported as missing logs. The caller can restore
+storage or remove the disposable index while accounting is stopped.
 SQLite uses WAL with NORMAL synchronization: transactions remain atomic, but
 host power loss can discard recent cache commits and cause extra downloads.
 The cache also retains full Spark event-log objects and JSON metadata checkpoints,

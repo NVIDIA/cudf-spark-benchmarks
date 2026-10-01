@@ -260,6 +260,34 @@ def test_concurrent_writer_is_pending_and_releases_connection(tmp_path, sample):
     assert calculate(request, s3, tmp_path) == reference
 
 
+def test_malformed_persistent_index_is_not_reported_as_pending(tmp_path, sample):
+    request, log = sample
+    s3 = VersionedS3({KEY: log})
+    assert calculate(request, s3, tmp_path).complete
+    database = next(tmp_path.glob("*.sqlite3"))
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE records")
+        connection.execute("CREATE TABLE records (bogus TEXT)")
+
+    for _ in range(2):
+        with pytest.raises(sqlite3.OperationalError, match="no such column: app"):
+            calculate(request, s3, tmp_path)
+
+
+def test_interrupted_sqlite_query_remains_retryable(tmp_path, sample):
+    request, log = sample
+    s3 = VersionedS3({KEY: log})
+    with sqlite3.connect(":memory:") as connection:
+        connection.set_progress_handler(lambda: 1, 1)
+        with pytest.raises(sqlite3.OperationalError) as captured:
+            connection.execute("SELECT 1")
+    assert captured.value.sqlite_errorcode == sqlite3.SQLITE_INTERRUPT
+
+    with patch.object(api, "materialize_application_logs", side_effect=captured.value):
+        pending = calculate(request, s3, tmp_path)
+    assert not pending.complete and pending.retryable
+
+
 def test_concurrent_replacement_cannot_mix_snapshots(tmp_path, sample):
     request, log = sample
     key2 = PREFIX + "hadoop-yarn-resourcemanager-z.log"

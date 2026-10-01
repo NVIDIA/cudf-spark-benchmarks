@@ -411,6 +411,17 @@ def calculate_emr_application_usage(
             request, emr_client, s3_client, cache_dir, check_budget
         )
     except (TimeoutError, sqlite3.OperationalError, ArchivePendingError) as error:
+        if isinstance(error, sqlite3.OperationalError):
+            code = getattr(error, "sqlite_errorcode", None)
+            # SQLite also reports a budget-interrupted progress callback as an
+            # OperationalError. Lock contention is likewise safe to retry, but
+            # storage or schema failures will not be fixed by waiting for logs.
+            if not isinstance(code, int) or code & 0xFF not in {
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+                sqlite3.SQLITE_INTERRUPT,
+            }:
+                raise
         logger.info("event=yarn_accounting_pending reason=%s", type(error).__name__)
         return _empty_result(request, str(error), retryable=True)
 
