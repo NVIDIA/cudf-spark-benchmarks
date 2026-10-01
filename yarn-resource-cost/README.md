@@ -80,6 +80,50 @@ when a log shipper uploads them sooner. Only file names containing
 the `LogUri` archive is used instead. The `calculate_yarn_job_cost.py` CLI
 accepts the same prefix as `--yarn-log-shipper-uri`.
 
+### Low-latency collection on persistent clusters
+
+Set `rm_only=True` on `EmrApplicationUsageRequest` and pass a persistent
+`cache_dir` to `calculate_emr_application_usage`. In this opt-in mode:
+
+- Only RM objects are downloaded. An explicit `yarn_log_uri` is authoritative:
+  missing uploads return retryable pending evidence, with no fallback to EMR/NM
+  archives. Without it, RM objects are selected from the cluster's `LogUri`.
+- The Spark event log is not read until the target application's RM summary is
+  available. Only the target application's indexed records and historical
+  scheduler/node metadata are passed to the accounting parser.
+- A disposable SQLite index per bucket/prefix reuses objects with unchanged
+  ETag, size, and modification time. ETags are opaque identities. Downloads use
+  conditional GETs; replacements commit atomically per object. Deleted objects
+  are removed from the current snapshot. Objects without ETags are not reused.
+- Timeouts, concurrent index refresh conflicts, S3 replacement/deletion races,
+  and unreadable compressed RM archives return retryable pending evidence, never
+  complete results from a partial refresh. Completed objects survive retries.
+
+`timeout_seconds` defaults to 120 and must be finite and positive. This is a
+cooperative processing budget, **not a hard wall-clock deadline**: it cannot
+interrupt an in-flight SDK request or decompression operation. Configure bounded
+connect/read timeouts and retries on the injected clients. A single object must
+fit within the budget to be indexed; use smaller rolled logs or a larger budget
+if cold attempts repeatedly stop on the same object.
+
+The index requires a private local filesystem with SQLite locking; do not share
+it through object storage or a network filesystem. Multiple local processes may
+use it; lock contention returns pending after a short wait. It stores normalized
+log evidence, with owner-only permissions on newly created databases/directories.
+It is not an authoritative accounting store. No cross-source TTL or size-based
+eviction is performed: provision a quota/monitor disk usage, and remove obsolete
+source indexes only when their callers are stopped. Removing an index is safe
+then, but the next call incurs a cold scan. Deleted-object pages are reused by
+SQLite; the database file does not automatically shrink.
+
+Cold calls still read the RM history. Warm calls still list the source prefix
+and read global metadata; the optimization avoids repeated archive downloads
+and parsing unrelated applications, not all work proportional to cluster age.
+Use the narrow shipper prefix to reduce listing overhead. INFO events
+`yarn_archive_list`, `yarn_archive_download`, `yarn_rm_index`,
+`yarn_application_parse`, `yarn_eventlog_materialize`, and `yarn_eventlog_parse`
+report phase timing and, where applicable, objects, bytes, and cache reuse.
+
 `event_log_uri` accepts an S3 URI, a plain local path, or a local `file://` URI.
 Passing a pre-materialized local file or rolling-event-log directory avoids an
 S3 download; the selected event log is still streamed to extract accounting

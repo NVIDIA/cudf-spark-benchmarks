@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
-import shutil
+import logging
+import math
+import sqlite3
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,6 +20,9 @@ from urllib.request import url2pathname
 import calculate_yarn_job_cost as reporting
 from yarn_job_cost_core import calculator_mode, parse_yarn_logs
 from yarn_job_cost_discovery import read_event_log_metadata
+from yarn_job_cost_index import ArchivePendingError, materialize_application_logs
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -33,8 +39,10 @@ class EmrApplicationUsageRequest:
 
     Use this when a log shipper uploads ResourceManager logs faster than the EMR
     log pusher. When it contains no ResourceManager logs, the cluster LogUri
-    archive is used instead.
+    archive is used instead unless rm_only is enabled.
     """
+    rm_only: bool = False
+    timeout_seconds: float = 120.0
 
     def __post_init__(self) -> None:
         for name in ("cluster_id", "application_id", "event_log_uri", "region"):
@@ -42,6 +50,8 @@ class EmrApplicationUsageRequest:
                 raise ValueError(f"{name} is required")
         if self.yarn_log_uri is not None:
             _split_s3_uri(self.yarn_log_uri)
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -77,10 +87,23 @@ def _split_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key if separator else ""
 
 
-def _list_s3_objects(s3_client: Any, bucket: str, prefix: str) -> Iterable[dict[str, Any]]:
+def _list_s3_objects(
+    s3_client: Any, bucket: str, prefix: str
+) -> Iterable[dict[str, Any]]:
+    started = time.monotonic()
+    count = 0
     paginator = s3_client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        yield from page.get("Contents") or ()
+    try:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            items = page.get("Contents") or ()
+            count += len(items)
+            yield from items
+    finally:
+        logger.info(
+            "event=yarn_archive_list objects=%d duration_seconds=%.3f",
+            count,
+            time.monotonic() - started,
+        )
 
 
 def _safe_relative_key(key: str, prefix: str) -> Path:
@@ -97,27 +120,58 @@ def _download_objects(
     prefix: str,
     objects: Iterable[dict[str, Any]],
     destination: Path,
+    check_budget=lambda: None,
 ) -> list[Path]:
+    started = time.monotonic()
+    transferred = 0
     downloaded = []
     for item in objects:
+        check_budget()
         key = str(item.get("Key") or "")
         if not key or key.endswith("/"):
             continue
         target = destination / _safe_relative_key(key, prefix)
         target.parent.mkdir(parents=True, exist_ok=True)
-        body = s3_client.get_object(Bucket=bucket, Key=key)["Body"]
+        condition = {"IfMatch": item["ETag"]} if item.get("ETag") else {}
+        try:
+            body = s3_client.get_object(Bucket=bucket, Key=key, **condition)["Body"]
+        except Exception as error:
+            # Keep boto3 optional: only recognize the documented S3 race codes;
+            # authentication and other transport/provider failures still escape.
+            response = getattr(error, "response", {})
+            code = (
+                response.get("Error", {}).get("Code")
+                if isinstance(response, dict)
+                else None
+            )
+            if code in {"PreconditionFailed", "NoSuchKey", "412", "404"}:
+                raise ArchivePendingError(
+                    "Archive changed after listing; retry this snapshot"
+                ) from error
+            raise
         try:
             with target.open("wb") as output:
-                shutil.copyfileobj(body, output)
+                while chunk := body.read(1024 * 1024):
+                    check_budget()
+                    output.write(chunk)
+                    transferred += len(chunk)
         finally:
             close = getattr(body, "close", None)
             if close:
                 close()
         downloaded.append(target)
+    logger.info(
+        "event=yarn_archive_download objects=%d bytes=%d duration_seconds=%.3f",
+        len(downloaded),
+        transferred,
+        time.monotonic() - started,
+    )
     return downloaded
 
 
-def _materialize_event_log(s3_client: Any, uri: str, destination: Path) -> Path:
+def _materialize_event_log(
+    s3_client: Any, uri: str, destination: Path, check_budget=lambda: None
+) -> Path:
     if not uri.startswith(("s3://", "s3a://", "s3n://")):
         if uri.lower().startswith("file:"):
             parsed = urlparse(uri)
@@ -134,7 +188,10 @@ def _materialize_event_log(s3_client: Any, uri: str, destination: Path) -> Path:
 
     bucket, key = _split_s3_uri(uri)
     prefix = key.rstrip("/")
-    objects = list(_list_s3_objects(s3_client, bucket, prefix))
+    objects = []
+    for item in _list_s3_objects(s3_client, bucket, prefix):
+        check_budget()
+        objects.append(item)
     exact_object = next(
         (
             item
@@ -145,7 +202,7 @@ def _materialize_event_log(s3_client: Any, uri: str, destination: Path) -> Path:
     )
     if exact_object is not None:
         downloaded = _download_objects(
-            s3_client, bucket, prefix, (exact_object,), destination
+            s3_client, bucket, prefix, (exact_object,), destination, check_budget
         )
         return downloaded[0] if downloaded else destination
     selected = [
@@ -158,9 +215,13 @@ def _materialize_event_log(s3_client: Any, uri: str, destination: Path) -> Path:
         return destination
     prefix_name = Path(prefix).name
     event_destination = (
-        destination / prefix_name if prefix_name.startswith("eventlog_") else destination
+        destination / prefix_name
+        if prefix_name.startswith("eventlog_")
+        else destination
     )
-    _download_objects(s3_client, bucket, prefix, selected, event_destination)
+    _download_objects(
+        s3_client, bucket, prefix, selected, event_destination, check_budget
+    )
     return destination
 
 
@@ -183,18 +244,23 @@ def _download_yarn_logs(
     log_uri: str,
     markers: tuple[str, ...],
     destination: Path,
+    check_budget=lambda: None,
 ) -> list[Path]:
     bucket, prefix = _split_s3_uri(log_uri)
     if prefix and not prefix.endswith("/"):
         # Directory boundary: "j-TEST" must not also match "j-TEST2/".
         prefix += "/"
-    objects = [
-        item
-        for item in _list_s3_objects(s3_client, bucket, prefix)
-        if item.get("Size") != 0  # a zero-byte placeholder is not usable evidence
-        and any(marker in Path(str(item.get("Key") or "")).name for marker in markers)
-    ]
-    return _download_objects(s3_client, bucket, prefix, objects, destination)
+    objects = []
+    for item in _list_s3_objects(s3_client, bucket, prefix):
+        check_budget()
+        if item.get("Size") != 0 and any(
+            marker in Path(str(item.get("Key") or "")).name for marker in markers
+        ):
+            objects.append(item)
+    check_budget()
+    return _download_objects(
+        s3_client, bucket, prefix, objects, destination, check_budget
+    )
 
 
 def _materialize_yarn_logs(
@@ -203,10 +269,15 @@ def _materialize_yarn_logs(
     cluster_id: str,
     destination: Path,
     yarn_log_uri: str | None = None,
+    check_budget=lambda: None,
 ) -> list[Path]:
     if yarn_log_uri:
         downloaded = _download_yarn_logs(
-            s3_client, yarn_log_uri, ("hadoop-yarn-resourcemanager",), destination
+            s3_client,
+            yarn_log_uri,
+            ("hadoop-yarn-resourcemanager",),
+            destination,
+            check_budget,
         )
         if downloaded:
             return downloaded
@@ -215,6 +286,7 @@ def _materialize_yarn_logs(
         _cluster_log_uri(emr_client, cluster_id),
         ("hadoop-yarn-resourcemanager", "hadoop-yarn-nodemanager"),
         destination,
+        check_budget,
     )
 
 
@@ -239,6 +311,7 @@ def calculate_emr_application_usage(
     *,
     emr_client: Any,
     s3_client: Any,
+    cache_dir: Path | str | None = None,
 ) -> YarnApplicationUsageResult:
     """Calculate YARN resource usage for one EMR application.
 
@@ -246,43 +319,120 @@ def calculate_emr_application_usage(
     results. Provider authentication and transport errors are allowed to propagate.
     """
 
+    deadline = time.monotonic() + request.timeout_seconds
+
+    def check_budget():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("YARN accounting attempt exceeded its time budget")
+
+    try:
+        check_budget()
+        return _calculate_emr_application_usage(
+            request, emr_client, s3_client, cache_dir, check_budget
+        )
+    except (TimeoutError, sqlite3.OperationalError, ArchivePendingError) as error:
+        logger.info("event=yarn_accounting_pending reason=%s", type(error).__name__)
+        return _empty_result(request, str(error), retryable=True)
+
+
+def _calculate_emr_application_usage(
+    request, emr_client, s3_client, cache_dir, check_budget
+):
     with tempfile.TemporaryDirectory(prefix="yarn-resource-cost-") as directory:
         root = Path(directory)
-        event_root = _materialize_event_log(s3_client, request.event_log_uri, root / "events")
-        event_metadata = read_event_log_metadata(event_root)
-        metadata = event_metadata.get(request.application_id)
-        if metadata is None:
-            return _empty_result(
-                request,
-                f"Application {request.application_id} is missing from the Spark event log",
-                retryable=True,
+        metadata = None
+        if not request.rm_only:
+            metadata = _read_application_metadata(
+                request, s3_client, root, check_budget
             )
-        if metadata.event_log_read_errors:
-            return _empty_result(
-                request,
-                " | ".join(metadata.event_log_read_errors),
-                retryable=metadata.event_log_read_retryable,
-            )
-
+            if isinstance(metadata, YarnApplicationUsageResult):
+                return metadata
+        # Check RM availability before reading a potentially large Spark log.
         yarn_root = root / "yarn"
-        downloaded = _materialize_yarn_logs(
-            emr_client,
-            s3_client,
-            request.cluster_id,
-            yarn_root,
-            request.yarn_log_uri,
-        )
-        if not downloaded:
-            return _empty_result(
-                request,
-                f"No archived ResourceManager or NodeManager logs found for cluster {request.cluster_id}",
-                retryable=True,
+        if request.rm_only:
+            candidates = []
+            log_uri = request.yarn_log_uri or _cluster_log_uri(
+                emr_client, request.cluster_id
             )
+            bucket, prefix = _split_s3_uri(log_uri)
+            prefix = prefix.rstrip("/") + "/" if prefix else ""
+            for item in _list_s3_objects(s3_client, bucket, prefix):
+                check_budget()
+                if (
+                    item.get("Size") != 0
+                    and "hadoop-yarn-resourcemanager" in Path(item["Key"]).name
+                ):
+                    candidates.append(item)
+            if not candidates:
+                # An explicitly configured shipper is authoritative. Falling
+                # back while it is still uploading defeats cheap pending checks.
+                return _empty_result(
+                    request, "No archived ResourceManager logs found", retryable=True
+                )
 
+            def download(item):
+                return _download_objects(
+                    s3_client, bucket, prefix, [item], root / "downloads", check_budget
+                )[0]
+
+            started = time.monotonic()
+            yarn_root, changed = materialize_application_logs(
+                bucket=bucket,
+                prefix=prefix,
+                objects=candidates,
+                application_id=request.application_id,
+                cache_dir=Path(cache_dir) if cache_dir is not None else root / "index",
+                destination=yarn_root / "hadoop-yarn-resourcemanager-index.log",
+                download=download,
+                check_budget=check_budget,
+            )
+            logger.info(
+                "event=yarn_rm_index objects=%d changed=%d reused=%d duration_seconds=%.3f",
+                len(candidates),
+                changed,
+                len(candidates) - changed,
+                time.monotonic() - started,
+            )
+        else:
+            downloaded = _materialize_yarn_logs(
+                emr_client,
+                s3_client,
+                request.cluster_id,
+                yarn_root,
+                request.yarn_log_uri,
+                check_budget,
+            )
+            if not downloaded:
+                return _empty_result(
+                    request,
+                    "No archived ResourceManager or NodeManager logs found",
+                    retryable=True,
+                )
         try:
-            evidence = parse_yarn_logs(yarn_root)
+            started = time.monotonic()
+            evidence = parse_yarn_logs(yarn_root, check_budget=check_budget)
+            logger.info(
+                "event=yarn_application_parse containers=%d duration_seconds=%.3f",
+                len(evidence.containers),
+                time.monotonic() - started,
+            )
         except ValueError as error:
             return _empty_result(request, str(error), retryable=False)
+        if (
+            request.rm_only
+            and request.application_id not in evidence.application_summaries
+        ):
+            return _empty_result(
+                request, "ResourceManager ApplicationSummary is missing", retryable=True
+            )
+
+        if metadata is None:
+            metadata = _read_application_metadata(
+                request, s3_client, root, check_budget
+            )
+            if isinstance(metadata, YarnApplicationUsageResult):
+                return metadata
+
         try:
             mode = calculator_mode(evidence.calculator_class)
         except ValueError as error:
@@ -298,6 +448,11 @@ def calculate_emr_application_usage(
             for executor in metadata.executors.values()
             if executor.container_id
         }
+        evidence.containers = {
+            key: value
+            for key, value in evidence.containers.items()
+            if value.application_id == request.application_id
+        }
         applications = reporting.calculate_applications(
             evidence,
             mode,
@@ -305,8 +460,13 @@ def calculate_emr_application_usage(
             request.include_application_master,
             executor_containers,
         )
+        check_budget()
         application = next(
-            (item for item in applications if item["application_id"] == request.application_id),
+            (
+                item
+                for item in applications
+                if item["application_id"] == request.application_id
+            ),
             None,
         )
         if application is None:
@@ -337,6 +497,37 @@ def calculate_emr_application_usage(
             incomplete_container_count=int(application["incomplete_container_count"]),
             warnings=tuple(str(warning) for warning in application["warnings"]),
         )
+
+
+def _read_application_metadata(request, s3_client, root, check_budget):
+    started = time.monotonic()
+    event_root = _materialize_event_log(
+        s3_client, request.event_log_uri, root / "events", check_budget
+    )
+    logger.info(
+        "event=yarn_eventlog_materialize duration_seconds=%.3f",
+        time.monotonic() - started,
+    )
+    started = time.monotonic()
+    metadata = read_event_log_metadata(event_root, check_budget=check_budget).get(
+        request.application_id
+    )
+    logger.info(
+        "event=yarn_eventlog_parse duration_seconds=%.3f", time.monotonic() - started
+    )
+    if metadata is None:
+        return _empty_result(
+            request,
+            f"Application {request.application_id} is missing from the Spark event log",
+            retryable=True,
+        )
+    if metadata.event_log_read_errors:
+        return _empty_result(
+            request,
+            " | ".join(metadata.event_log_read_errors),
+            retryable=metadata.event_log_read_retryable,
+        )
+    return metadata
 
 
 __all__ = [

@@ -269,7 +269,7 @@ def _iter_application_event_lines(
         application.task_metric_warnings.append(warning)
 
 
-def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
+def read_event_log_metadata(path: Path, *, check_budget=lambda: None) -> dict[str, EventLogApplication]:
     applications: dict[str, EventLogApplication] = {}
     by_directory: dict[str, EventLogApplication] = {}
     for app_dir, member_name, stream, codec in iter_eventlog_streams(path):
@@ -288,6 +288,7 @@ def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
         for line in _iter_application_event_lines(
             stream, codec, member_name, current
         ):
+            check_budget()
             if not line:
                 continue
             try:

@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Callable, TextIO
 
 
 TIMESTAMP = r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})"
@@ -252,7 +252,7 @@ def _container_from_match(
     )
 
 
-def parse_yarn_logs(path: Path) -> YarnEvidence:
+def parse_yarn_logs(path: Path, *, check_budget: Callable[[], None] = lambda: None) -> YarnEvidence:
     """Parse RM/NM daemon logs without relying on a cloud-provider layout."""
     evidence = YarnEvidence()
     rm_finishes: dict[str, int] = {}
@@ -266,6 +266,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
         path_node = evidence.nodes.setdefault(path_node_id, Node(path_node_id))
         with open_log(file) as handle:
             for raw_line in handle:
+                check_budget()
                 line = normalize_log_line(raw_line)
                 summary = APPLICATION_SUMMARY_RE.search(line)
                 if summary:

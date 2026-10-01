@@ -31,6 +31,7 @@ PACKAGE_SOURCES = {
     PROJECT_DIR / "calculate_yarn_job_cost.py": "calculate_yarn_job_cost.py",
     PROJECT_DIR / "yarn_job_cost_discovery.py": "yarn_job_cost_discovery.py",
     PROJECT_DIR / "yarn_job_cost_eventlog.py": "yarn_job_cost_eventlog.py",
+    PROJECT_DIR / "yarn_job_cost_index.py": "yarn_job_cost_index.py",
     PROJECT_DIR / "yarn_job_cost_defaults.py": "yarn_job_cost_defaults.py",
     PROJECT_DIR / "test_calculate_yarn_job_cost.py": "test_calculate_yarn_job_cost.py",
     PROJECT_DIR / "test_portable_yarn_resource_cost.py": "test_portable_yarn_resource_cost.py",
