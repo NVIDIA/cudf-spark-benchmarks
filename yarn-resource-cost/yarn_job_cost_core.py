@@ -42,7 +42,7 @@ APPLICATION_SUMMARY_RE = re.compile(
     r"totalAllocatedContainers=(?P<containers>\d+)"
 )
 NODE_RE = re.compile(
-    r"Registered with ResourceManager .* total resource of "
+    r"Registered with ResourceManager(?: as (?P<host>[^:,\s]+):\d+)? .* total resource of "
     r"<memory:(?P<memory>\d+), vCores:(?P<vcores>\d+)(?P<resources>[^>]*)>"
 )
 RM_NODE_RE = re.compile(
@@ -263,7 +263,8 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
 
     for file in files:
         path_node_id = file.parent.name
-        path_node = evidence.nodes.setdefault(path_node_id, Node(path_node_id))
+        node_id = path_node_id
+        node = evidence.nodes.setdefault(node_id, Node(node_id))
         with open_log(file) as handle:
             for raw_line in handle:
                 line = normalize_log_line(raw_line)
@@ -324,17 +325,20 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                         int(node_match.group("vcores")),
                         node_match.group("resources"),
                     )
-                    path_node.instance_type = _node_instance_type(line)
-                    path_node.memory_mb = resources["memory-mb"]
-                    path_node.vcores = resources["vcores"]
-                    path_node.gpus = resources.get("yarn.io/gpu", 0)
-                    path_node.resources = resources
+                    node_id = node_match.group("host") or path_node_id
+                    node = evidence.nodes.setdefault(node_id, Node(node_id))
+                    node.instance_type = _node_instance_type(line)
+                    node.memory_mb = resources["memory-mb"]
+                    node.vcores = resources["vcores"]
+                    node.gpus = resources.get("yarn.io/gpu", 0)
+                    node.resources = resources
                     continue
                 assignment = RM_ASSIGN_RE.search(line)
                 if assignment:
                     host = assignment.group("host")
+                    assigned_node = evidence.nodes.setdefault(host, Node(host))
                     candidate = _container_from_match(
-                        assignment, host, evidence.nodes.get(host), "resourcemanager"
+                        assignment, host, assigned_node, "resourcemanager"
                     )
                     evidence.containers[candidate.container_id] = candidate
                     continue
@@ -349,7 +353,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                 start = START_RE.search(line)
                 if start:
                     candidate = _container_from_match(
-                        start, path_node_id, path_node, "nodemanager"
+                        start, node_id, node, "nodemanager"
                     )
                     evidence.containers.setdefault(candidate.container_id, candidate)
                     continue

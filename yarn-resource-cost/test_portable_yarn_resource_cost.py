@@ -72,6 +72,52 @@ class ProviderNeutralAccountingTest(unittest.TestCase):
         self.assertEqual("DominantResourceCalculator", evidence.calculator_class)
         self.assertEqual("DominantResourceFairnessPolicy", evidence.scheduler_policy)
 
+    def test_nodemanager_registration_preserves_reported_worker_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            path = log_dir / "hadoop-yarn-nodemanager.log"
+            path.write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker1:8041 with total resource of "
+                "<memory:8192, vCores:8, yarn.io/gpu:1>\n"
+                "2026-01-01 00:00:01,000 INFO X: Start request for "
+                "container_1_0001_01_000002 with resource "
+                "<memory:2048, vCores:2, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        node = evidence.nodes["worker1"]
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertEqual(8192, node.memory_mb)
+        self.assertEqual(1, node.resources["yarn.io/gpu"])
+        self.assertEqual("worker1", container.node_id)
+        self.assertEqual(8192, container.node_memory_mb)
+
+    def test_resourcemanager_assignment_preserves_host_without_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            path = log_dir / "hadoop-yarn-resourcemanager.log"
+            path.write_text(
+                "2026-01-01 00:00:01,000 INFO X: Assigned container "
+                "container_1_0001_01_000002 of capacity "
+                "<memory:2048, vCores:2, yarn.io/gpu:1> "
+                "on host worker1:8041\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        node = evidence.nodes["worker1"]
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertIsNone(node.memory_mb)
+        self.assertIsNone(node.vcores)
+        self.assertEqual({}, node.resources)
+        self.assertEqual("worker1", container.node_id)
+        self.assertEqual(0, container.node_memory_mb)
+        self.assertEqual(0, container.node_vcores)
+
 
 class AdapterTest(unittest.TestCase):
     def test_catalog_cost_and_node_mapping(self):
