@@ -257,13 +257,15 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
     evidence = YarnEvidence()
     rm_finishes: dict[str, int] = {}
     nm_finishes: dict[str, int] = {}
+    nm_node_ids: dict[Path, str] = {}
+    unresolved_nm_containers: dict[Path, list[Container]] = {}
     files = relevant_log_files(path)
     if not files:
         raise ValueError(f"No ResourceManager or NodeManager log files found under {path}")
 
     for file in files:
         path_node_id = file.parent.name
-        node_id = path_node_id
+        node_id = nm_node_ids.get(file.parent, path_node_id)
         node = evidence.nodes.setdefault(node_id, Node(node_id))
         with open_log(file) as handle:
             for raw_line in handle:
@@ -327,6 +329,10 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                     )
                     node_id = node_match.group("host") or path_node_id
                     node = evidence.nodes.setdefault(node_id, Node(node_id))
+                    if node_match.group("host"):
+                        nm_node_ids[file.parent] = node_id
+                        for container in unresolved_nm_containers.pop(file.parent, []):
+                            container.node_id = node_id
                     node.instance_type = _node_instance_type(line)
                     node.memory_mb = resources["memory-mb"]
                     node.vcores = resources["vcores"]
@@ -355,7 +361,15 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                     candidate = _container_from_match(
                         start, node_id, node, "nodemanager"
                     )
-                    evidence.containers.setdefault(candidate.container_id, candidate)
+                    container = evidence.containers.setdefault(
+                        candidate.container_id, candidate
+                    )
+                    if (
+                        container is candidate
+                        and file.parent not in nm_node_ids
+                        and node_id == path_node_id
+                    ):
+                        unresolved_nm_containers.setdefault(file.parent, []).append(container)
                     continue
                 done = DONE_RE.search(line)
                 if done:
