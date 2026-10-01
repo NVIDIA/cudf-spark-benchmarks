@@ -153,7 +153,8 @@ def _download_objects(
     Indexed RM and event-log reads need the listed ETag and size to remain stable.
     Legacy YARN archive reads intentionally accept a newer object: they scan the
     whole cluster without checkpoints, so a changing log must not restart every
-    attempt. Those reads verify the GET response's own ContentLength when available.
+    attempt. Those reads verify the GET response's ContentLength; a boto3-like
+    client must supply it because the stale listing cannot prove completeness.
     """
     started = time.monotonic()
     transferred = 0
@@ -215,6 +216,14 @@ def _download_objects(
             raise
         temporary = None
         try:
+            response_size = response.get("ContentLength")
+            if not require_listed_version and (
+                type(response_size) is not int or response_size < 0
+            ):
+                raise ValueError(
+                    "S3 GetObject response must include nonnegative ContentLength "
+                    "for legacy YARN archive reads"
+                )
             if cached_object is not None:
                 # Publish complete objects independently of metadata parsing.
                 # Temporary files live beside the cached object for atomic replacement.
@@ -231,18 +240,10 @@ def _download_objects(
                     output.write(chunk)
                     written += len(chunk)
                     transferred += len(chunk)
-            listed_size = item.get("Size")
-            response_size = response.get("ContentLength")
-            if require_listed_version:
-                size_mismatch = listed_size is not None and written != listed_size
-            elif response_size is not None:
-                size_mismatch = written != response_size
-            else:
-                # A Body-only injected client cannot prove the new size after
-                # a replacement. Reject definite short reads, but allow growth
-                # beyond the stale listing so the legacy path can progress.
-                size_mismatch = listed_size is not None and written < listed_size
-            if size_mismatch:
+            expected_size = (
+                item.get("Size") if require_listed_version else response_size
+            )
+            if expected_size is not None and written != expected_size:
                 raise ArchivePendingError(
                     "Archive download length differs from the expected object size; retry this snapshot"
                 )

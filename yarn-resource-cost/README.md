@@ -72,6 +72,11 @@ usage = calculate_emr_application_usage(
 print(usage.instance_seconds_by_type)
 ```
 
+Injected S3 clients must provide the boto3 `GetObject` response's
+`ContentLength` for legacy YARN archive reads. Without it, a log replaced after
+listing cannot be distinguished from a truncated download; the API raises an
+error rather than returning incomplete usage as a complete result.
+
 ResourceManager and NodeManager logs are read from the cluster's EMR `LogUri`
 archive by default, which the EMR log pusher updates about every five minutes.
 Set `yarn_log_uri` to an S3 prefix holding this cluster's ResourceManager logs
