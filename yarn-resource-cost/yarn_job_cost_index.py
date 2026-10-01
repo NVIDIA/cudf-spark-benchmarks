@@ -74,6 +74,12 @@ def materialize_application_logs(
     database.touch(mode=0o600, exist_ok=True)
     changed = 0
     with closing(sqlite3.connect(database, timeout=1)) as connection:
+        # This is a rebuildable cache, not the durable accounting store. WAL
+        # with NORMAL sync preserves atomicity without fsyncing every object.
+        # A host power loss may discard recent commits; those objects are then
+        # fetched again, never considered indexed without their records.
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
         # SQLite converts callback exceptions into OperationalError, which the
         # API returns as pending. Include large selections/deletions in budget.
         connection.set_progress_handler(lambda: check_budget() or 0, 10000)

@@ -110,6 +110,8 @@ The index requires a private local filesystem with SQLite locking; do not share
 it through object storage or a network filesystem. Multiple local processes may
 use it; lock contention returns pending after a short wait. It stores normalized
 log evidence, with owner-only permissions on newly created databases/directories.
+SQLite uses WAL with NORMAL synchronization: transactions remain atomic, but
+host power loss can discard recent cache commits and cause extra downloads.
 It is not an authoritative accounting store. No cross-source TTL or size-based
 eviction is performed: provision a quota/monitor disk usage, and remove obsolete
 source indexes only when their callers are stopped. Removing an index is safe
