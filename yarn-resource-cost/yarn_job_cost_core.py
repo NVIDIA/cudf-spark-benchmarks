@@ -257,7 +257,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
     evidence = YarnEvidence()
     rm_finishes: dict[str, int] = {}
     nm_finishes: dict[str, int] = {}
-    nm_node_ids: dict[Path, str] = {}
+    nm_hosts_by_dir: dict[Path, set[str]] = {}
     unresolved_nm_containers: dict[Path, list[Container]] = {}
     files = relevant_log_files(path)
     if not files:
@@ -265,7 +265,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
 
     for file in files:
         path_node_id = file.parent.name
-        node_id = nm_node_ids.get(file.parent, path_node_id)
+        node_id = path_node_id
         node = evidence.nodes.setdefault(node_id, Node(node_id))
         with open_log(file) as handle:
             for raw_line in handle:
@@ -330,8 +330,8 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                     node_id = node_match.group("host") or path_node_id
                     node = evidence.nodes.setdefault(node_id, Node(node_id))
                     if node_match.group("host"):
-                        nm_node_ids[file.parent] = node_id
-                        for container in unresolved_nm_containers.pop(file.parent, []):
+                        nm_hosts_by_dir.setdefault(file.parent, set()).add(node_id)
+                        for container in unresolved_nm_containers.pop(file, []):
                             container.node_id = node_id
                     node.instance_type = _node_instance_type(line)
                     node.memory_mb = resources["memory-mb"]
@@ -364,12 +364,8 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                     container = evidence.containers.setdefault(
                         candidate.container_id, candidate
                     )
-                    if (
-                        container is candidate
-                        and file.parent not in nm_node_ids
-                        and node_id == path_node_id
-                    ):
-                        unresolved_nm_containers.setdefault(file.parent, []).append(container)
+                    if container is candidate and node_id == path_node_id:
+                        unresolved_nm_containers.setdefault(file, []).append(container)
                     continue
                 done = DONE_RE.search(line)
                 if done:
@@ -378,6 +374,20 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                     nm_finishes[container_id] = min(
                         finish, nm_finishes.get(container_id, finish)
                     )
+
+    # A rotated single-worker archive can put registration and starts in
+    # different files. Infer across files only when the directory contains one
+    # unambiguous reported NodeManager host. With multiple workers, keep the
+    # path-derived identity unknown rather than assigning another worker's
+    # capacity.
+    for unresolved_file, containers in unresolved_nm_containers.items():
+        hosts = nm_hosts_by_dir.get(unresolved_file.parent, set())
+        if len(hosts) != 1:
+            continue
+        host = next(iter(hosts))
+        for container in containers:
+            if container.node_id == unresolved_file.parent.name:
+                container.node_id = host
 
     for container_id, container in evidence.containers.items():
         # Registration evidence may be stored in a later file than the
