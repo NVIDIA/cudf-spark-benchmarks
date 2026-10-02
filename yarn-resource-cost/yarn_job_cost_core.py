@@ -42,7 +42,7 @@ APPLICATION_SUMMARY_RE = re.compile(
     r"totalAllocatedContainers=(?P<containers>\d+)"
 )
 NODE_RE = re.compile(
-    r"Registered with ResourceManager .* total resource of "
+    r"Registered with ResourceManager(?: as (?P<host>[^:,\s]+):\d+)? .* total resource of "
     r"<memory:(?P<memory>\d+), vCores:(?P<vcores>\d+)(?P<resources>[^>]*)>"
 )
 RM_NODE_RE = re.compile(
@@ -257,13 +257,17 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
     evidence = YarnEvidence()
     rm_finishes: dict[str, int] = {}
     nm_finishes: dict[str, int] = {}
+    nm_hosts_by_dir: dict[Path, set[str]] = {}
+    unresolved_nm_containers: dict[Path, list[Container]] = {}
     files = relevant_log_files(path)
     if not files:
         raise ValueError(f"No ResourceManager or NodeManager log files found under {path}")
 
     for file in files:
         path_node_id = file.parent.name
-        path_node = evidence.nodes.setdefault(path_node_id, Node(path_node_id))
+        node_id = path_node_id
+        node = evidence.nodes.setdefault(node_id, Node(node_id))
+        file_reported_host: str | None = None
         with open_log(file) as handle:
             for raw_line in handle:
                 line = normalize_log_line(raw_line)
@@ -324,17 +328,29 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                         int(node_match.group("vcores")),
                         node_match.group("resources"),
                     )
-                    path_node.instance_type = _node_instance_type(line)
-                    path_node.memory_mb = resources["memory-mb"]
-                    path_node.vcores = resources["vcores"]
-                    path_node.gpus = resources.get("yarn.io/gpu", 0)
-                    path_node.resources = resources
+                    reported_host = node_match.group("host")
+                    node_id = reported_host or path_node_id
+                    node = evidence.nodes.setdefault(node_id, Node(node_id))
+                    if reported_host:
+                        file_reported_host = node_id
+                        nm_hosts_by_dir.setdefault(file.parent, set()).add(node_id)
+                        for container in unresolved_nm_containers.pop(file, []):
+                            container.node_id = node_id
+                    instance_type = _node_instance_type(line)
+                    if instance_type:
+                        node.instance_type = instance_type
+                    node.memory_mb = resources["memory-mb"]
+                    node.vcores = resources["vcores"]
+                    node.gpus = resources.get("yarn.io/gpu", 0)
+                    node.resources = resources
+                    node.registered_with_rm = True
                     continue
                 assignment = RM_ASSIGN_RE.search(line)
                 if assignment:
                     host = assignment.group("host")
+                    assigned_node = evidence.nodes.setdefault(host, Node(host))
                     candidate = _container_from_match(
-                        assignment, host, evidence.nodes.get(host), "resourcemanager"
+                        assignment, host, assigned_node, "resourcemanager"
                     )
                     evidence.containers[candidate.container_id] = candidate
                     continue
@@ -349,9 +365,13 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                 start = START_RE.search(line)
                 if start:
                     candidate = _container_from_match(
-                        start, path_node_id, path_node, "nodemanager"
+                        start, node_id, node, "nodemanager"
                     )
-                    evidence.containers.setdefault(candidate.container_id, candidate)
+                    container = evidence.containers.setdefault(
+                        candidate.container_id, candidate
+                    )
+                    if container is candidate and file_reported_host is None:
+                        unresolved_nm_containers.setdefault(file, []).append(container)
                     continue
                 done = DONE_RE.search(line)
                 if done:
@@ -360,6 +380,20 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                     nm_finishes[container_id] = min(
                         finish, nm_finishes.get(container_id, finish)
                     )
+
+    # A rotated single-worker archive can put registration and starts in
+    # different files. Infer across files only when the directory contains one
+    # unambiguous reported NodeManager host. With multiple workers, keep the
+    # path-derived identity unknown rather than assigning another worker's
+    # capacity.
+    for unresolved_file, containers in unresolved_nm_containers.items():
+        hosts = nm_hosts_by_dir.get(unresolved_file.parent, set())
+        if len(hosts) != 1:
+            continue
+        host = next(iter(hosts))
+        for container in containers:
+            if container.node_id == unresolved_file.parent.name:
+                container.node_id = host
 
     for container_id, container in evidence.containers.items():
         # Registration evidence may be stored in a later file than the
