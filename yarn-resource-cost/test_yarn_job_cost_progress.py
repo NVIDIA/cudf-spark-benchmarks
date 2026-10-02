@@ -319,7 +319,7 @@ def test_event_replacement_invalidates_successor_checkpoints(tmp_path):
     assert result == calculate(replace(request, rm_only=False), s3, None)
 
 
-def test_failed_event_download_never_publishes_partial_blob(tmp_path):
+def test_failed_event_download_never_publishes_partial_cached_object(tmp_path):
     request, objects = event_fixture()
     s3 = VersionedS3(objects)
     original = s3.get_object
@@ -337,7 +337,7 @@ def test_failed_event_download_never_publishes_partial_blob(tmp_path):
 
     with patch.object(s3, "get_object", side_effect=download):
         assert calculate(request, s3, tmp_path).retryable
-    assert not list((tmp_path / "event-objects-v1").iterdir())
+    assert not list((tmp_path / "s3-objects-v1").iterdir())
     assert calculate(request, s3, tmp_path).complete
 
 
@@ -366,7 +366,7 @@ def test_silent_short_event_download_cannot_return_complete_usage(tmp_path):
     assert not pending.complete and pending.retryable
     assert "download length differs" in pending.warnings[0]
     # Segment one is complete; the short second segment must not be published.
-    assert len(list((cache / "event-objects-v1").iterdir())) == 1
+    assert len(list((cache / "s3-objects-v1").iterdir())) == 1
     assert calculate(request, s3, cache) == full
 
 

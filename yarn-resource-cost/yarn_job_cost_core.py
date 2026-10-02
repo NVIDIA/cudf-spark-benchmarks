@@ -252,7 +252,9 @@ def _container_from_match(
     )
 
 
-def parse_yarn_logs(path: Path, *, check_budget: Callable[[], None] = lambda: None) -> YarnEvidence:
+def parse_yarn_logs(
+    path: Path, *, check_timeout: Callable[[], None] = lambda: None
+) -> YarnEvidence:
     """Parse RM/NM daemon logs without relying on a cloud-provider layout."""
     evidence = YarnEvidence()
     rm_finishes: dict[str, int] = {}
@@ -266,7 +268,7 @@ def parse_yarn_logs(path: Path, *, check_budget: Callable[[], None] = lambda: No
         path_node = evidence.nodes.setdefault(path_node_id, Node(path_node_id))
         with open_log(file) as handle:
             for raw_line in handle:
-                check_budget()
+                check_timeout()
                 line = normalize_log_line(raw_line)
                 summary = APPLICATION_SUMMARY_RE.search(line)
                 if summary:

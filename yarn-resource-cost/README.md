@@ -87,82 +87,51 @@ accepts the same prefix as `--yarn-log-shipper-uri`.
 
 ### Low-latency collection on persistent clusters
 
-Set `rm_only=True` on `EmrApplicationUsageRequest` and pass a persistent
-`cache_dir` to `calculate_emr_application_usage`. In this opt-in mode:
+Use `rm_only=True` to account for one application from ResourceManager (RM)
+logs without waiting for the NodeManager archive. Reuse a persistent local
+`cache_dir` across calls so retries do not repeat completed downloads and
+parsing. If a log shipper uploads RM logs sooner than EMR, point `yarn_log_uri`
+at that cluster's S3 prefix:
 
-- Only RM objects are downloaded. An explicit `yarn_log_uri` is authoritative:
-  missing uploads return retryable pending evidence, with no fallback to EMR/NM
-  archives. Without it, RM objects are selected from the cluster's `LogUri`.
-- The Spark event log is not read until an attempt has observed the target
-  application's RM summary. A source/application-scoped scheduling hint then
-  gives event downloads and parsing priority on subsequent attempts, so repeated
-  active-RM refreshes cannot starve their checkpoints. The hint is not evidence:
-  every complete result still refreshes and validates the current RM snapshot.
-  A missing RM archive still returns pending before reading event logs. Priority
-  attempts stop that availability probe at the first RM object, then list the
-  full RM snapshot after event processing, immediately before index refresh.
-  This avoids carrying pre-event-work ETags across slow event processing while
-  preserving conditional GETs and concurrent-refresh checks.
-  Only the target application's indexed records and historical
-  scheduler/node metadata are passed to the accounting parser.
-- A disposable SQLite index per bucket/prefix reuses objects with unchanged
-  ETag, size, and modification time. ETags are opaque identities. Downloads use
-  conditional GETs; replacements commit atomically per object. Deleted objects
-  are removed from the current snapshot. A generation fence rejects listings
-  older than a concurrent index update. Objects without ETags are not reused.
-- Never-indexed RM objects are processed before refreshing previously indexed
-  objects, so a growing active log cannot repeatedly displace cold archive work.
-- With `cache_dir`, complete S3 Spark event-log objects are published atomically
-  to an identity-keyed cache after validating the listed object size. Parsing
-  checkpoints retain successful whole-segment metadata before final validation.
-  A changed segment invalidates all subsequent
-  checkpoints; failed reads are never checkpointed. Local files also support
-  parsing checkpoints, identified by device, inode, size, and nanosecond mtime.
-  Do not mutate local input files while accounting is running.
-- Timeouts, concurrent index refresh conflicts, S3 replacement/deletion races,
-  and unreadable compressed RM archives return retryable pending evidence, never
-  complete results from a partial refresh. Completed objects survive retries.
+```python
+from pathlib import Path
 
-For `rm_only=True`, an omitted `timeout_seconds` uses 120 seconds. Omitting it
-in the original `rm_only=False` path preserves unbounded processing; callers
-may set an explicit finite, positive budget for either mode. The budget is a
-cooperative processing limit, **not a hard wall-clock deadline**: it cannot
-interrupt an in-flight SDK request or decompression operation. Configure bounded
-connect/read timeouts and retries on the injected clients. A single object must
-fit within the budget to be indexed; use smaller rolled logs or a larger budget
-if cold attempts repeatedly stop on the same object. Spark event-log downloads
-and parsing checkpoint separately: each download and each segment's parsing
-must individually fit the budget, but their aggregate need not fit one attempt.
-Resume requires the same persistent `cache_dir`; without it attempts are stateless.
-Once event metadata is warm, the current mutable RM snapshot plus listing and
-warm-cache lookup overhead must still fit one attempt. Multiple changing RM
-objects whose combined refresh exceeds the budget require smaller rolled logs
-or a larger budget; per-object caching cannot make that snapshot converge.
+usage = calculate_emr_application_usage(
+    EmrApplicationUsageRequest(
+        cluster_id="j-EXAMPLE",
+        application_id="application_123_0001",
+        event_log_uri="s3://example-bucket/spark-events/eventlog_v2_application_123_0001/",
+        region="us-west-2",
+        yarn_log_uri="s3://example-bucket/rm-logs/j-EXAMPLE/",
+        rm_only=True,
+    ),
+    emr_client=session.client("emr"),
+    s3_client=session.client("s3"),
+    cache_dir=Path("/path/to/persistent/local/cache"),
+)
+```
 
-The index requires a private local filesystem with SQLite locking; do not share
-it through object storage or a network filesystem. Multiple local processes may
-use it; lock contention returns pending after a short wait. It stores normalized
-log evidence, with owner-only permissions on newly created databases/directories.
-Permanent SQLite errors, such as a full disk or invalid cache schema, propagate
-to the caller instead of being reported as missing logs. The caller can restore
-storage or remove the disposable index while accounting is stopped.
-SQLite uses WAL with NORMAL synchronization: transactions remain atomic, but
-host power loss can discard recent cache commits and cause extra downloads.
-The cache also retains full Spark event-log objects and JSON metadata checkpoints,
-which can require substantially more space than the RM index alone.
-It is not an authoritative accounting store. No cross-source TTL or size-based
-eviction is performed: provision a quota/monitor disk usage, and remove obsolete
-source indexes only when their callers are stopped. Removing an index is safe
-then, but the next call incurs a cold scan. Deleted-object pages are reused by
-SQLite; the database file does not automatically shrink.
+This uses the `[aws]` installation above (boto3 and `zstandard`) and Python's
+built-in SQLite. Under `cache_dir`, the tool keeps an RM index in
+`rm-index-v1-*.sqlite3`, complete S3 event-log downloads in `s3-objects-v1/`,
+and event metadata in `event-metadata-v1/`. Use private, writable local storage
+with SQLite locking; the cache includes full event logs, has no automatic
+eviction, and must not be removed while calls are running.
 
-Cold calls still read the RM history. Warm calls still list the source prefix
-and read global metadata; the optimization avoids repeated archive downloads
-and parsing unrelated applications, not all work proportional to cluster age.
-Use the narrow shipper prefix to reduce listing overhead. INFO events
-`yarn_archive_list`, `yarn_archive_download`, `yarn_rm_index`,
-`yarn_application_parse`, `yarn_eventlog_materialize`, and `yarn_eventlog_parse`
-report phase timing and, where applicable, objects, bytes, and cache reuse.
+If `usage.complete` is false and `usage.retryable` is true, retry later with
+the same `cache_dir`. A specified `yarn_log_uri` is authoritative in this mode:
+missing RM uploads return pending instead of falling back to EMR's archive.
+Omit it to read RM logs from the cluster's EMR `LogUri` instead. A cold call
+still reads RM history; a warm call still lists the RM prefix.
+
+RM-only calls default to a 120-second `timeout_seconds` so one accounting
+attempt can return retryable pending and resume from the cache. The original
+mode remains unbounded unless you set a timeout. This does not limit the Spark
+job's runtime or measured usage. The timeout is cooperative: it cannot stop
+an in-flight S3 request, and each download must fit within an attempt. Set
+bounded SDK timeouts separately; use smaller rolled logs or a larger
+`timeout_seconds` if retries make no progress. INFO logs report phase timings,
+downloaded bytes, and cache reuse.
 
 `event_log_uri` accepts an S3 URI, a plain local path, or a local `file://` URI.
 Passing a pre-materialized local file or rolling-event-log directory avoids an

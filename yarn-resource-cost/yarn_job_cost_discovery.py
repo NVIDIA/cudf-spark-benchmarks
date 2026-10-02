@@ -269,12 +269,15 @@ def _iter_application_event_lines(
 
 
 def read_event_log_metadata(
-    path: Path, *, check_budget=lambda: None, checkpoints: EventCheckpoints | None = None
+    path: Path,
+    *,
+    check_timeout=lambda: None,
+    checkpoints: EventCheckpoints | None = None,
 ) -> dict[str, EventLogApplication]:
     applications: dict[str, EventLogApplication] = {}
     by_directory: dict[str, EventLogApplication] = {}
     for app_dir, member_name, stream, codec in iter_eventlog_streams(path):
-        check_budget()
+        check_timeout()
         identity = stream_identity(stream, path) if checkpoints else None
         if checkpoints:
             checkpoints.advance(app_dir, member_name, identity)
@@ -297,7 +300,7 @@ def read_event_log_metadata(
         for line in _iter_application_event_lines(
             stream, codec, member_name, current
         ):
-            check_budget()
+            check_timeout()
             if not line:
                 continue
             try:

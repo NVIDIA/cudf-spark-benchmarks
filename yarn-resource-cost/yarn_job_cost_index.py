@@ -81,7 +81,7 @@ def materialize_application_logs(
     cache_dir: Path,
     destination: Path,
     download: Callable[[dict], Path],
-    check_budget: Callable[[], None],
+    check_timeout: Callable[[], None],
     listing_generation: int,
 ) -> tuple[Path, int]:
     """Refresh changed objects atomically and emit only this app plus global evidence.
@@ -105,7 +105,7 @@ def materialize_application_logs(
         connection.execute("PRAGMA synchronous=NORMAL")
         # SQLite converts callback exceptions into OperationalError, which the
         # API returns as pending. Include large selections/deletions in budget.
-        connection.set_progress_handler(lambda: check_budget() or 0, 10000)
+        connection.set_progress_handler(lambda: check_timeout() or 0, 10000)
         connection.executescript(
             "CREATE TABLE IF NOT EXISTS objects (key TEXT PRIMARY KEY, fingerprint TEXT);"
             "CREATE TABLE IF NOT EXISTS records (key TEXT, line INTEGER, app TEXT, text TEXT);"
@@ -127,7 +127,7 @@ def materialize_application_logs(
         # Finish cold objects before spending another attempt on a growing log
         # that was already indexed. Selection still uses the complete snapshot.
         for item in sorted(objects, key=lambda item: str(item["Key"]) in known):
-            check_budget()
+            check_timeout()
             key = str(item["Key"])
             # No stable identity means no reuse, even for size-preserving writes.
             fingerprint = json.dumps(
@@ -158,7 +158,7 @@ def materialize_application_logs(
                 try:
                     with open_log(path) as stream:
                         for number, raw_line in enumerate(stream):
-                            check_budget()
+                            check_timeout()
                             line = normalize_log_line(raw_line)
                             app = _application(line)
                             if app is not None:
@@ -210,6 +210,6 @@ def materialize_application_logs(
                     "SELECT text FROM records WHERE app IN ('', ?) ORDER BY key, line",
                     (application_id,),
                 ):
-                    check_budget()
+                    check_timeout()
                     output.write(line.rstrip("\n") + "\n")
     return destination, changed

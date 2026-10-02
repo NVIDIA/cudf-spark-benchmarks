@@ -123,11 +123,11 @@ def _safe_relative_key(key: str, prefix: str) -> Path:
     return Path(*parts)
 
 
-def _list_rm_objects(s3_client, bucket, prefix, check_budget, *, first_only=False):
-    check_budget()
+def _list_rm_objects(s3_client, bucket, prefix, check_timeout, *, first_only=False):
+    check_timeout()
     candidates = []
     for item in _list_s3_objects(s3_client, bucket, prefix):
-        check_budget()
+        check_timeout()
         if (
             item.get("Size") != 0
             and "hadoop-yarn-resourcemanager" in Path(item["Key"]).name
@@ -144,24 +144,22 @@ def _download_objects(
     prefix: str,
     objects: Iterable[dict[str, Any]],
     destination: Path,
-    check_budget=lambda: None,
+    check_timeout=lambda: None,
     cache_dir: Path | None = None,
     require_listed_version: bool = True,
 ) -> list[Path]:
-    """Download objects, optionally requiring the version observed by listing.
+    """Download S3 objects, optionally reusing verified copies from a local cache.
 
-    Indexed RM and event-log reads need the listed ETag and size to remain stable.
-    Legacy YARN archive reads intentionally accept a newer object: they scan the
-    whole cluster without checkpoints, so a changing log must not restart every
-    attempt. Those reads verify the GET response's ContentLength; a boto3-like
-    client must supply it because the stale listing cannot prove completeness.
+    When require_listed_version is true, reject objects changed since listing.
+    The legacy YARN caller disables that check to tolerate active log updates;
+    those downloads instead verify the GET response's ContentLength.
     """
     started = time.monotonic()
     transferred = 0
     reused = 0
     downloaded = []
     for item in objects:
-        check_budget()
+        check_timeout()
         key = str(item.get("Key") or "")
         if not key or key.endswith("/"):
             continue
@@ -169,8 +167,8 @@ def _download_objects(
         target.parent.mkdir(parents=True, exist_ok=True)
         cached_object = None
         if cache_dir is not None and item.get("ETag"):
-            # Reuse only a complete event-log object with the same listed
-            # identity; publish new downloads atomically after verification.
+            # Reuse only a complete object with the same listed identity;
+            # publish new downloads atomically after verification.
             identity = json.dumps(
                 [
                     bucket,
@@ -180,7 +178,7 @@ def _download_objects(
                     str(item.get("LastModified", "")),
                 ]
             )
-            object_cache_dir = cache_dir / "event-objects-v1"
+            object_cache_dir = cache_dir / "s3-objects-v1"
             object_cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             cached_object = (
                 object_cache_dir / hashlib.sha256(identity.encode()).hexdigest()
@@ -236,7 +234,7 @@ def _download_objects(
             written = 0
             with output:
                 while chunk := body.read(1024 * 1024):
-                    check_budget()
+                    check_timeout()
                     output.write(chunk)
                     written += len(chunk)
                     transferred += len(chunk)
@@ -271,7 +269,7 @@ def _materialize_event_log(
     s3_client: Any,
     uri: str,
     destination: Path,
-    check_budget=lambda: None,
+    check_timeout=lambda: None,
     cache_dir: Path | None = None,
 ) -> Path:
     if not uri.startswith(("s3://", "s3a://", "s3n://")):
@@ -292,7 +290,7 @@ def _materialize_event_log(
     prefix = key.rstrip("/")
     objects = []
     for item in _list_s3_objects(s3_client, bucket, prefix):
-        check_budget()
+        check_timeout()
         objects.append(item)
     exact_object = next(
         (
@@ -309,7 +307,7 @@ def _materialize_event_log(
             prefix,
             (exact_object,),
             destination,
-            check_budget,
+            check_timeout,
             cache_dir,
         )
         return downloaded[0] if downloaded else destination
@@ -328,7 +326,7 @@ def _materialize_event_log(
         else destination
     )
     _download_objects(
-        s3_client, bucket, prefix, selected, event_destination, check_budget, cache_dir
+        s3_client, bucket, prefix, selected, event_destination, check_timeout, cache_dir
     )
     return destination
 
@@ -352,7 +350,7 @@ def _download_yarn_logs(
     log_uri: str,
     markers: tuple[str, ...],
     destination: Path,
-    check_budget=lambda: None,
+    check_timeout=lambda: None,
 ) -> list[Path]:
     bucket, prefix = _split_s3_uri(log_uri)
     if prefix and not prefix.endswith("/"):
@@ -360,19 +358,19 @@ def _download_yarn_logs(
         prefix += "/"
     objects = []
     for item in _list_s3_objects(s3_client, bucket, prefix):
-        check_budget()
+        check_timeout()
         if item.get("Size") != 0 and any(
             marker in Path(str(item.get("Key") or "")).name for marker in markers
         ):
             objects.append(item)
-    check_budget()
+    check_timeout()
     return _download_objects(
         s3_client,
         bucket,
         prefix,
         objects,
         destination,
-        check_budget,
+        check_timeout,
         require_listed_version=False,
     )
 
@@ -383,7 +381,7 @@ def _materialize_yarn_logs(
     cluster_id: str,
     destination: Path,
     yarn_log_uri: str | None = None,
-    check_budget=lambda: None,
+    check_timeout=lambda: None,
 ) -> list[Path]:
     if yarn_log_uri:
         downloaded = _download_yarn_logs(
@@ -391,7 +389,7 @@ def _materialize_yarn_logs(
             yarn_log_uri,
             ("hadoop-yarn-resourcemanager",),
             destination,
-            check_budget,
+            check_timeout,
         )
         if downloaded:
             return downloaded
@@ -400,7 +398,7 @@ def _materialize_yarn_logs(
         _cluster_log_uri(emr_client, cluster_id),
         ("hadoop-yarn-resourcemanager", "hadoop-yarn-nodemanager"),
         destination,
-        check_budget,
+        check_timeout,
     )
 
 
@@ -478,7 +476,7 @@ def calculate_emr_application_usage(
 
 
 def _calculate_emr_application_usage(
-    request, emr_client, s3_client, cache_dir, check_budget
+    request, emr_client, s3_client, cache_dir, check_timeout
 ):
     with tempfile.TemporaryDirectory(prefix="yarn-resource-cost-") as directory:
         root = Path(directory)
@@ -487,7 +485,7 @@ def _calculate_emr_application_usage(
         event_priority = None
         if not request.rm_only:
             metadata = _read_application_metadata(
-                request, s3_client, root, check_budget, event_cache
+                request, s3_client, root, check_timeout, event_cache
             )
             if isinstance(metadata, YarnApplicationUsageResult):
                 return metadata
@@ -523,7 +521,7 @@ def _calculate_emr_application_usage(
                 else None
             )
             candidates = _list_rm_objects(
-                s3_client, bucket, prefix, check_budget, first_only=prioritize_events
+                s3_client, bucket, prefix, check_timeout, first_only=prioritize_events
             )
             if not candidates:
                 # An explicitly configured shipper is authoritative. Falling
@@ -536,7 +534,7 @@ def _calculate_emr_application_usage(
                 # event checkpoints the first processing slice. Otherwise a
                 # changing RM log can consume that slice on every retry.
                 metadata = _read_application_metadata(
-                    request, s3_client, root, check_budget, event_cache
+                    request, s3_client, root, check_timeout, event_cache
                 )
                 if isinstance(metadata, YarnApplicationUsageResult):
                     return metadata
@@ -544,7 +542,7 @@ def _calculate_emr_application_usage(
                 # outlast its upload interval, even with warm checkpoints; list
                 # the full current snapshot only now, just before indexing.
                 listing_generation = read_index_generation(index_cache, bucket, prefix)
-                candidates = _list_rm_objects(s3_client, bucket, prefix, check_budget)
+                candidates = _list_rm_objects(s3_client, bucket, prefix, check_timeout)
                 if not candidates:
                     return _empty_result(
                         request,
@@ -554,7 +552,7 @@ def _calculate_emr_application_usage(
 
             def download(item):
                 return _download_objects(
-                    s3_client, bucket, prefix, [item], root / "downloads", check_budget
+                    s3_client, bucket, prefix, [item], root / "downloads", check_timeout
                 )[0]
 
             started = time.monotonic()
@@ -566,7 +564,7 @@ def _calculate_emr_application_usage(
                 cache_dir=index_cache,
                 destination=yarn_root / "hadoop-yarn-resourcemanager-index.log",
                 download=download,
-                check_budget=check_budget,
+                check_timeout=check_timeout,
                 listing_generation=listing_generation,
             )
             logger.info(
@@ -583,7 +581,7 @@ def _calculate_emr_application_usage(
                 request.cluster_id,
                 yarn_root,
                 request.yarn_log_uri,
-                check_budget,
+                check_timeout,
             )
             if not downloaded:
                 return _empty_result(
@@ -593,7 +591,7 @@ def _calculate_emr_application_usage(
                 )
         try:
             started = time.monotonic()
-            evidence = parse_yarn_logs(yarn_root, check_budget=check_budget)
+            evidence = parse_yarn_logs(yarn_root, check_timeout=check_timeout)
             logger.info(
                 "event=yarn_application_parse containers=%d duration_seconds=%.3f",
                 len(evidence.containers),
@@ -617,7 +615,7 @@ def _calculate_emr_application_usage(
                 event_priority.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 event_priority.touch(mode=0o600, exist_ok=True)
             metadata = _read_application_metadata(
-                request, s3_client, root, check_budget, event_cache
+                request, s3_client, root, check_timeout, event_cache
             )
             if isinstance(metadata, YarnApplicationUsageResult):
                 return metadata
@@ -649,7 +647,7 @@ def _calculate_emr_application_usage(
             request.include_application_master,
             executor_containers,
         )
-        check_budget()
+        check_timeout()
         application = next(
             (
                 item
@@ -688,10 +686,10 @@ def _calculate_emr_application_usage(
         )
 
 
-def _read_application_metadata(request, s3_client, root, check_budget, cache_dir=None):
+def _read_application_metadata(request, s3_client, root, check_timeout, cache_dir=None):
     started = time.monotonic()
     event_root = _materialize_event_log(
-        s3_client, request.event_log_uri, root / "events", check_budget, cache_dir
+        s3_client, request.event_log_uri, root / "events", check_timeout, cache_dir
     )
     logger.info(
         "event=yarn_eventlog_materialize duration_seconds=%.3f",
@@ -704,7 +702,7 @@ def _read_application_metadata(request, s3_client, root, check_budget, cache_dir
         else None
     )
     metadata = read_event_log_metadata(
-        event_root, check_budget=check_budget, checkpoints=checkpoints
+        event_root, check_timeout=check_timeout, checkpoints=checkpoints
     ).get(request.application_id)
     logger.info(
         "event=yarn_eventlog_parse checkpoint_hits=%d duration_seconds=%.3f",
