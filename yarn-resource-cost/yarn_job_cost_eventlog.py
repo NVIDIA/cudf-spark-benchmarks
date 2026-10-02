@@ -117,11 +117,28 @@ def iter_zstd_chunks(stream: BinaryIO) -> Iterable[bytes]:
             retryable=False,
         ) from error
     try:
-        decompressor = zstandard.ZstdDecompressor()
-        with decompressor.stream_reader(
-            stream, read_across_frames=True, closefd=False
-        ) as reader:
-            yield from iter(lambda: reader.read(READ_SIZE), b"")
+        compressed = b""
+        while True:
+            frame = zstandard.ZstdDecompressor().decompressobj(
+                write_size=READ_SIZE
+            )
+            while not frame.eof:
+                if not compressed:
+                    compressed = stream.read(READ_SIZE)
+                    if not compressed:
+                        raise EventLogReadError(
+                            "Truncated Zstandard frame", retryable=True
+                        )
+                output = frame.decompress(compressed)
+                compressed = frame.unconsumed_tail
+                for offset in range(0, len(output), READ_SIZE):
+                    yield output[offset : offset + READ_SIZE]
+
+            compressed = frame.unused_data
+            if not compressed:
+                compressed = stream.read(READ_SIZE)
+                if not compressed:
+                    return
     except zstandard.ZstdError as error:
         raise EventLogReadError(
             f"Unable to decompress Zstandard event log: {error}",
