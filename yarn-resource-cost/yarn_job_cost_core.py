@@ -267,6 +267,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
         path_node_id = file.parent.name
         node_id = path_node_id
         node = evidence.nodes.setdefault(node_id, Node(node_id))
+        file_reported_host: str | None = None
         with open_log(file) as handle:
             for raw_line in handle:
                 line = normalize_log_line(raw_line)
@@ -327,17 +328,22 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                         int(node_match.group("vcores")),
                         node_match.group("resources"),
                     )
-                    node_id = node_match.group("host") or path_node_id
+                    reported_host = node_match.group("host")
+                    node_id = reported_host or path_node_id
                     node = evidence.nodes.setdefault(node_id, Node(node_id))
-                    if node_match.group("host"):
+                    if reported_host:
+                        file_reported_host = node_id
                         nm_hosts_by_dir.setdefault(file.parent, set()).add(node_id)
                         for container in unresolved_nm_containers.pop(file, []):
                             container.node_id = node_id
-                    node.instance_type = _node_instance_type(line)
+                    instance_type = _node_instance_type(line)
+                    if instance_type:
+                        node.instance_type = instance_type
                     node.memory_mb = resources["memory-mb"]
                     node.vcores = resources["vcores"]
                     node.gpus = resources.get("yarn.io/gpu", 0)
                     node.resources = resources
+                    node.registered_with_rm = True
                     continue
                 assignment = RM_ASSIGN_RE.search(line)
                 if assignment:
@@ -364,7 +370,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                     container = evidence.containers.setdefault(
                         candidate.container_id, candidate
                     )
-                    if container is candidate and node_id == path_node_id:
+                    if container is candidate and file_reported_host is None:
                         unresolved_nm_containers.setdefault(file, []).append(container)
                     continue
                 done = DONE_RE.search(line)
