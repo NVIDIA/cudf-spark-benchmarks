@@ -117,6 +117,9 @@ built-in SQLite. Under `cache_dir`, the tool keeps an RM index in
 and event metadata in `event-metadata-v1/`. Use private, writable local storage
 with SQLite locking; the cache includes full event logs, has no automatic
 eviction, and must not be removed while calls are running.
+Permanent cache errors, such as a full disk or invalid SQLite schema, raise an
+exception rather than a retryable result. Restore storage, or stop all callers
+before deleting the disposable index so the next call can rebuild it.
 
 If `usage.complete` is false and `usage.retryable` is true, retry later with
 the same `cache_dir`. A specified `yarn_log_uri` is authoritative in this mode:
