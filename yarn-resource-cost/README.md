@@ -72,6 +72,11 @@ usage = calculate_emr_application_usage(
 print(usage.instance_seconds_by_type)
 ```
 
+Injected S3 clients must provide the boto3 `GetObject` response's
+`ContentLength` for legacy YARN archive reads. Without it, a log replaced after
+listing cannot be distinguished from a truncated download; the API raises an
+error rather than returning incomplete usage as a complete result.
+
 ResourceManager and NodeManager logs are read from the cluster's EMR `LogUri`
 archive by default, which the EMR log pusher updates about every five minutes.
 Set `yarn_log_uri` to an S3 prefix holding this cluster's ResourceManager logs
@@ -79,6 +84,57 @@ when a log shipper uploads them sooner. Only file names containing
 `hadoop-yarn-resourcemanager` are read from that prefix; when none exist yet,
 the `LogUri` archive is used instead. The `calculate_yarn_job_cost.py` CLI
 accepts the same prefix as `--yarn-log-shipper-uri`.
+
+### Low-latency collection on persistent clusters
+
+Use `rm_only=True` to account for one application from ResourceManager (RM)
+logs without waiting for the NodeManager archive. Reuse a persistent local
+`cache_dir` across calls so retries do not repeat completed downloads and
+parsing. If a log shipper uploads RM logs sooner than EMR, point `yarn_log_uri`
+at that cluster's S3 prefix:
+
+```python
+from pathlib import Path
+
+usage = calculate_emr_application_usage(
+    EmrApplicationUsageRequest(
+        cluster_id="j-EXAMPLE",
+        application_id="application_123_0001",
+        event_log_uri="s3://example-bucket/spark-events/eventlog_v2_application_123_0001/",
+        region="us-west-2",
+        yarn_log_uri="s3://example-bucket/rm-logs/j-EXAMPLE/",
+        rm_only=True,
+    ),
+    emr_client=session.client("emr"),
+    s3_client=session.client("s3"),
+    cache_dir=Path("/path/to/persistent/local/cache"),
+)
+```
+
+This uses the `[aws]` installation above (boto3 and `zstandard`) and Python's
+built-in SQLite. Under `cache_dir`, the tool keeps an RM index in
+`rm-index-v1-*.sqlite3`, complete S3 event-log downloads in `s3-objects-v1/`,
+and event metadata in `event-metadata-v1/`. Use private, writable local storage
+with SQLite locking; the cache includes full event logs, has no automatic
+eviction, and must not be removed while calls are running.
+Permanent cache errors, such as a full disk or invalid SQLite schema, raise an
+exception rather than a retryable result. Restore storage, or stop all callers
+before deleting the disposable index so the next call can rebuild it.
+
+If `usage.complete` is false and `usage.retryable` is true, retry later with
+the same `cache_dir`. A specified `yarn_log_uri` is authoritative in this mode:
+missing RM uploads return pending instead of falling back to EMR's archive.
+Omit it to read RM logs from the cluster's EMR `LogUri` instead. A cold call
+still reads RM history; a warm call still lists the RM prefix.
+
+RM-only calls default to a 120-second `timeout_seconds` so one accounting
+attempt can return retryable pending and resume from the cache. The original
+mode remains unbounded unless you set a timeout. This does not limit the Spark
+job's runtime or measured usage. The timeout is cooperative: it cannot stop
+an in-flight S3 request, and each download must fit within an attempt. Set
+bounded SDK timeouts separately; use smaller rolled logs or a larger
+`timeout_seconds` if retries make no progress. INFO logs report phase timings,
+downloaded bytes, and cache reuse.
 
 `event_log_uri` accepts an S3 URI, a plain local path, or a local `file://` URI.
 Passing a pre-materialized local file or rolling-event-log directory avoids an
