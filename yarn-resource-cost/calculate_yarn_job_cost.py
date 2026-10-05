@@ -733,6 +733,22 @@ def calculate_applications(
                 "NodeManager DONE fallback"
             )
 
+        unregistered_node_ids = sorted(
+            {
+                container.node_id
+                for container in complete_containers
+                if (
+                    evidence.nodes.get(container.node_id) is None
+                    or not evidence.nodes[container.node_id].registered_with_rm
+                )
+            }
+        )
+        if unregistered_node_ids:
+            warnings.append(
+                "Node registration evidence is missing for: "
+                + ", ".join(unregistered_node_ids)
+            )
+
         by_instance_type: dict[str, float] = defaultdict(float)
         by_instance_vcore_seconds: dict[str, float] = defaultdict(float)
         container_seconds = 0.0
@@ -786,6 +802,7 @@ def calculate_applications(
             or nm_finish_fallbacks > 0
             or unknown_instance_type
             or missing_gpu_capacity
+            or bool(unregistered_node_ids)
             or bool(resource_capacity_errors)
         )
         permanent_incomplete_evidence = evidence.accounting_policy_ambiguous
