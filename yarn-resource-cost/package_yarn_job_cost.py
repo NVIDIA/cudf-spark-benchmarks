@@ -34,6 +34,9 @@ PACKAGE_SOURCES = {
     PROJECT_DIR / "yarn_job_cost_eventlog.py": "yarn_job_cost_eventlog.py",
     PROJECT_DIR / "yarn_job_cost_index.py": "yarn_job_cost_index.py",
     PROJECT_DIR / "yarn_job_cost_defaults.py": "yarn_job_cost_defaults.py",
+    PROJECT_DIR / "yarn_job_cost_projection.py": "yarn_job_cost_projection.py",
+    PROJECT_DIR / "test_yarn_job_cost_projection.py": "test_yarn_job_cost_projection.py",
+    PROJECT_DIR / "COST_PROJECTION.md": "COST_PROJECTION.md",
     PROJECT_DIR / "test_calculate_yarn_job_cost.py": "test_calculate_yarn_job_cost.py",
     PROJECT_DIR / "test_portable_yarn_resource_cost.py": "test_portable_yarn_resource_cost.py",
     PROJECT_DIR / "test_fair_scheduler_policy.py": "test_fair_scheduler_policy.py",
@@ -115,6 +118,7 @@ def validate_bundle(root: Path) -> None:
     run([sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test*.py"], cwd=root)
     run([sys.executable, "yarn_resource_cost.py", "--help"], cwd=root)
     run([sys.executable, "-S", "yarn_resource_cost.py", "--help"], cwd=root)
+    run([sys.executable, "-S", "yarn_resource_cost.py", "project", "--help"], cwd=root)
 
 
 def remove_bytecode(root: Path) -> None:

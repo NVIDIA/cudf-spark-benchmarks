@@ -40,6 +40,7 @@ from yarn_job_cost_discovery import (
     read_event_log_metadata,
     resolve_emr_log_uri,
 )
+from yarn_job_cost_projection import project_costs, projection_main  # noqa: F401
 
 
 PORTABLE_FIELDS = (
@@ -84,7 +85,10 @@ COMPARISON_FIELDS = (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="For annual costs and payback from saved reports: yarn-resource-cost project --help",
+    )
     parser.add_argument("--adapter", choices=ADAPTERS, required=True)
     parser.add_argument("--event-log-root", required=True)
     parser.add_argument("--yarn-log-root")
@@ -413,6 +417,8 @@ def print_table(rows: list[dict], fields: tuple[str, ...]) -> None:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["project"]:
+        return projection_main(sys.argv[2:])
     args = parse_args()
     validate_args(args)
     catalog = load_price_catalog(args.price_catalog) if args.price_catalog else None

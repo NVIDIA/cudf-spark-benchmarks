@@ -14,6 +14,16 @@ auditable hourly rate. Spark event logs select applications and provide names,
 wall-clock duration, executor/container joins, and task-packing diagnostics;
 they are not treated as the allocation ledger.
 
+## Annual cost and payback
+
+Use `yarn-resource-cost project` to extend two saved accounting reports with
+annual frequency, full-fleet uptime, operating expenses, migration/purchase
+costs, ROI, NPV and sustained payback. It reuses complete application resource
+and pricing evidence. Choose explicitly between annual task-attributed costs
+and a provisioned worker bill that includes paid idle capacity. See
+[Annual cost and payback projection](COST_PROJECTION.md) for the plan format,
+worked examples, formulas and limits.
+
 ## Requirements
 
 - Python 3.10 or newer. Installing the package also installs `zstandard` for

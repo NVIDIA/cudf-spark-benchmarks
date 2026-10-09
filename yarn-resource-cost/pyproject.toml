@@ -35,5 +35,6 @@ py-modules = [
   "yarn_job_cost_discovery",
   "yarn_job_cost_eventlog",
   "yarn_job_cost_index",
+  "yarn_job_cost_projection",
   "yarn_resource_cost",
 ]
