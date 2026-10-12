@@ -16,6 +16,14 @@ EULA are identified as such within the files.
 
 You may not use NDS-H except in compliance with the Apache License, Version 2.0 and the TPC EULA.
 
+## Continuing after query failures
+
+Add `--allow_failure` to an `nds_h_power.py` run to exit successfully even when a
+query fails or completes with failed tasks. Without the flag, these failures
+still produce exit code 1. The time-log CSV and per-query JSON summaries are
+written as usual; failed queries remain visible in `queryStatus` and their time
+is still counted in `Power Test Time`.
+
 ## Prerequisites
 
 1. Python >= 3.6
