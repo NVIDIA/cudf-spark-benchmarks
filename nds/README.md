@@ -248,6 +248,20 @@ When converting CSV to Parquet data, the script will add data partitioning to so
 | web_sales          | ws_sold_date_sk     |
 | web_returns        | wr_returned_date_sk |
 
+`nds_power.py --cutoff_date 2001-07-01` loads only fact partitions whose date keys
+map to that date or earlier in `date_dim`, including NULL-date partitions. Dimension
+tables are read in full. The facts must use the partition layout listed above;
+unknown date keys and unexpected layouts are rejected.
+
+The driver cutoff only restricts data; it does not change query text or date
+literals. Direct callers must supply queries whose date windows fit the loaded
+range. ab's unified time-shifting support coordinates query dates with the data
+cutoff.
+
+Cutoff loading uses temporary views and requires a classic Spark session on the
+driver, including distributed Spark, with file-backed inputs. It cannot be combined with Iceberg, Delta, Hive, Spark Connect
+or `--analyze_tables`. Without `--cutoff_date`, loading is unchanged.
+
 ## Query Generation
 
 The [templates.patch](./tpcds-gen/patches/templates.patch) that contains necessary modifications to make NDS queries runnable in Spark will be applied automatically in the build step. The final query templates will be in folder `$TPCDS_HOME/query_templates` after the build process.
