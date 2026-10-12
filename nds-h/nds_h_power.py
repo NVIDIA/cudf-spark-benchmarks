@@ -44,6 +44,7 @@ from setup_utils import add_utils_to_sys_path
 add_utils_to_sys_path()
 from spark_utils import setQueryName, clearQueryName
 from profiler import Profiler
+from benchmark_statistics import isolated_session, analyze_catalog
 
 from python_benchmark_reporter.PysparkBenchReport import PysparkBenchReport
 from pyspark.sql import DataFrame
@@ -120,7 +121,8 @@ def gen_sql_from_stream(query_stream_file_path):
     return extended_queries
 
 
-def setup_tables(spark_session, input_prefix, input_format, execution_time_list, analyze_tables=False):
+def setup_tables(spark_session, input_prefix, input_format, execution_time_list,
+                 analyze_tables=False, analyze=None):
     """set up data tables in Spark before running the Power Run queries.
 
     Args:
@@ -129,6 +131,7 @@ def setup_tables(spark_session, input_prefix, input_format, execution_time_list,
         input_format (str): type of input data source, e.g. parquet, orc, csv, json.
         execution_time_list ([(str, str, int)]): a list to record query and its execution time.
         analyze_tables (bool): whether to compute table statistics after creating TempViews.
+        analyze (str): optional none, table, or column mode in an isolated catalog.
 
     Returns:
         execution_time_list: a list recording que15ry execution time.
@@ -145,12 +148,12 @@ def setup_tables(spark_session, input_prefix, input_format, execution_time_list,
             reader = reader.schema(schema)
         print("Loading table ", table_path)
         print("table name ", table_name)
-        if analyze_tables:
+        if analyze_tables or analyze in ('table', 'column'):
             _create_data_source_table(spark_session, table_name, table_path, input_format, schema)
         else:
             reader.load(table_path).createOrReplaceTempView(table_name)
         end = int(time.time() * 1000)
-        create_action = "Table" if analyze_tables else "TempView"
+        create_action = "Table" if analyze_tables or analyze in ('table', 'column') else "TempView"
         print("====== Creating {} for table {} ======".format(create_action, table_name))
         print("Time taken: {} millis for table {}".format(end - start, table_name))
         execution_time_list.append(
@@ -289,7 +292,7 @@ def run_query_stream(input_prefix,
                      profiling_hook=None,
                      app_name=None,
                      spark_connect=None,
-                     analyze_tables=False):
+                     analyze_tables=False, analyze=None):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. TempView Creation time is also recorded.
 
@@ -307,6 +310,8 @@ def run_query_stream(input_prefix,
         :param json_summary_folder : path to save JSON summary files for each query.
         :param analyze_tables : whether to compute table statistics after creating tables.
     """
+    if analyze is not None and (analyze_tables or spark_connect):
+        raise ValueError('--analyze cannot be combined with legacy analysis or Spark Connect')
     queries_reports = []
     execution_time_list = []
     total_time_start = time.time()
@@ -322,18 +327,24 @@ def run_query_stream(input_prefix,
         spark_properties = load_properties(property_file)
         for k, v in spark_properties.items():
             session_builder = session_builder.config(k, v)
-    spark_session = session_builder.appName(
-        app_name).getOrCreate()
+    spark_session = (isolated_session(session_builder, app_name, analyze,
+                                      json_summary_folder, input_format)
+                     if analyze is not None else
+                     session_builder.appName(app_name).getOrCreate())
     spark_app_id = _get_app_id(spark_session)
     if input_format != 'iceberg' and input_format != 'delta':
         execution_time_list = setup_tables(spark_session, input_prefix, input_format,
                                            execution_time_list,
-                                           analyze_tables)
+                                           analyze_tables, analyze)
     elif input_format == 'delta':
         execution_time_list = register_delta_tables(spark_session, input_prefix,
                                                      execution_time_list)
 
     check_json_summary_folder(json_summary_folder)
+    if analyze is not None:
+        statistics = analyze_catalog(spark_session, analyze, get_schemas().keys(),
+                                     json_summary_folder)
+        execution_time_list.append((spark_app_id, "Statistics Time", statistics['duration_ms']))
     if sub_queries:
         query_dict = get_query_subset(query_dict, sub_queries)
 
@@ -448,6 +459,8 @@ if __name__ == "__main__":
                              'for more details.',
                         choices=['parquet', 'orc', 'avro', 'csv', 'json', 'iceberg', 'delta'],
                         default='parquet')
+    parser.add_argument('--analyze', choices=['none', 'table', 'column'],
+                        help='Analyze inputs in a fresh catalog and record separate statistics cost.')
     parser.add_argument('--analyze_tables',
                         action='store_true',
                         help='Run ANALYZE TABLE <table> COMPUTE STATISTICS after creating each table.')
@@ -516,4 +529,5 @@ if __name__ == "__main__":
                      args.profiling_hook,
                      args.app_name,
                      args.spark_connect,
-                     args.analyze_tables)
+                     args.analyze_tables,
+                     args.analyze)

@@ -49,6 +49,7 @@ from setup_utils import add_utils_to_sys_path
 add_utils_to_sys_path()
 from spark_utils import setQueryName, clearQueryName
 from profiler import Profiler
+from benchmark_statistics import isolated_session, analyze_catalog
 
 check_version()
 
@@ -79,7 +80,14 @@ def _schema_to_ddl(schema):
     ])
 
 
-def _create_data_source_table(spark_session, table_name, table_path, input_format, schema=None):
+def _create_data_source_table(spark_session, table_name, table_path, input_format, schema=None,
+                              partitions=None, partition_column=None):
+    if partitions is not None:
+        if spark_session.conf.get('spark.sql.hive.manageFilesourcePartitions', 'true').lower() == 'false':
+            raise ValueError('Cutoff catalog tables require spark.sql.hive.manageFilesourcePartitions=true')
+        if (spark_session.catalog.tableExists(table_name) and
+                not spark_session.catalog.getTable(table_name).isTemporary):
+            raise ValueError("Cutoff loading requires a fresh catalog table: " + table_name)
     table_identifier = _quote_identifier(table_name)
     schema_clause = " ({})".format(_schema_to_ddl(schema)) if schema else ""
     create_sql = "CREATE TABLE IF NOT EXISTS {}{} USING {} LOCATION {}".format(
@@ -87,10 +95,21 @@ def _create_data_source_table(spark_session, table_name, table_path, input_forma
         schema_clause,
         input_format,
         _quote_sql_string(table_path))
+    if partitions is not None:
+        create_sql = "CREATE TABLE IF NOT EXISTS {}{} USING {} PARTITIONED BY ({}) LOCATION {}".format(
+            table_identifier, schema_clause, input_format, _quote_identifier(partition_column),
+            _quote_sql_string(table_path))
     print(create_sql)
     spark_session.catalog.dropTempView(table_name)
     spark_session.sql(create_sql)
-    if any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
+    if partitions is not None:
+        for value, path in partitions:
+            add_sql = "ALTER TABLE {} ADD IF NOT EXISTS PARTITION ({}={}) LOCATION {}".format(
+                table_identifier, _quote_identifier(partition_column),
+                _quote_sql_string(value), _quote_sql_string(path))
+            print(add_sql)
+            spark_session.sql(add_sql)
+    elif any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
         spark_session.catalog.recoverPartitions(table_name)
 
 
@@ -309,7 +328,7 @@ def gen_sql_from_stream(query_stream_file_path):
     return extended_queries
 
 def setup_tables(spark_session, input_prefix, input_format, use_decimal, execution_time_list,
-                 analyze_tables=False, cutoff_date=None):
+                 analyze_tables=False, cutoff_date=None, analyze=None):
     """set up data tables in Spark before running the Power Run queries.
 
     Args:
@@ -320,6 +339,7 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
         execution_time_list ([(str, str, int)]): a list to record query and its execution time.
         analyze_tables (bool): whether to compute table statistics after creating TempViews.
         cutoff_date (date): include dated fact partitions through this date, plus NULL.
+        analyze (str): optional none, table, or column mode in an isolated catalog.
 
     Returns:
         execution_time_list: a list recording query execution time.
@@ -344,14 +364,20 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
             reader = reader.schema(schema)
         if table_name in partitions:
             selected = partitions[table_name]
-            reader.option('basePath', table_path).load(
-                [path for _, path in selected]).createOrReplaceTempView(table_name)
-        elif analyze_tables:
+            selected_frame = reader.option('basePath', table_path).load(
+                [path for _, path in selected])
+            if analyze in ('table', 'column'):
+                _create_data_source_table(
+                    spark_session, table_name, table_path, input_format, selected_frame.schema,
+                    selected, DATE_PARTITION_COLUMNS[table_name])
+            else:
+                selected_frame.createOrReplaceTempView(table_name)
+        elif analyze_tables or analyze in ('table', 'column'):
             _create_data_source_table(spark_session, table_name, table_path, input_format, schema)
         else:
             reader.load(table_path).createOrReplaceTempView(table_name)
         end = int(time.time() * 1000)
-        create_action = "Table" if analyze_tables else "TempView"
+        create_action = "Table" if analyze_tables or analyze in ('table', 'column') else "TempView"
         print("====== Creating {} for table {} ======".format(create_action, table_name))
         print("Time taken: {} millis for table {}".format(end - start, table_name))
         execution_time_list.append(
@@ -509,7 +535,7 @@ def run_query_stream(input_prefix,
                      skip_execution=False,
                      app_name=None,
                      spark_connect=None,
-                     analyze_tables=False, cutoff_date=None):
+                     analyze_tables=False, cutoff_date=None, analyze=None):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. TempView Creation time is also recorded.
 
@@ -526,10 +552,15 @@ def run_query_stream(input_prefix,
         to "parquet".
         analyze_tables (bool, optional): whether to compute table statistics after creating tables.
     """
+    if analyze is not None:
+        if analyze_tables or spark_connect:
+            raise ValueError('--analyze cannot be combined with legacy analysis or Spark Connect')
+        if hive_external:
+            raise ValueError('--analyze cannot use an external Hive catalog')
     if cutoff_date is not None and (input_format in ('iceberg', 'delta') or
                                     hive_external or spark_connect or analyze_tables):
-        raise ValueError('--cutoff_date requires file-backed inputs, temporary views, '
-                         'and a classic Spark session (not Spark Connect)')
+        raise ValueError('--cutoff_date requires file-backed inputs and a classic Spark session '
+                         '(not Spark Connect); it cannot be combined with --analyze_tables')
     queries_reports = []
     execution_time_list = []
     total_time_start = time.time()
@@ -557,8 +588,10 @@ def run_query_stream(input_prefix,
     if hive_external:
         session_builder.enableHiveSupport()
 
-    spark_session = session_builder.appName(
-        app_name).getOrCreate()
+    spark_session = (isolated_session(session_builder, app_name, analyze,
+                                      json_summary_folder, input_format)
+                     if analyze is not None else
+                     session_builder.appName(app_name).getOrCreate())
     if hive_external:
         spark_session.catalog.setCurrentDatabase(input_prefix)
 
@@ -569,9 +602,13 @@ def run_query_stream(input_prefix,
     if input_format != 'iceberg' and input_format != 'delta' and not hive_external:
         execution_time_list = setup_tables(spark_session, input_prefix, input_format, use_decimal,
                                            execution_time_list,
-                                           analyze_tables, cutoff_date)
+                                           analyze_tables, cutoff_date, analyze)
 
     check_json_summary_folder(json_summary_folder)
+    if analyze is not None:
+        statistics = analyze_catalog(spark_session, analyze, get_schemas(False).keys(),
+                                     json_summary_folder)
+        execution_time_list.append((spark_app_id, "Statistics Time", statistics['duration_ms']))
     if sub_queries:
         query_dict = get_query_subset(query_dict, sub_queries)
     if sub_query_patterns:
@@ -726,6 +763,8 @@ if __name__ == "__main__":
                         help='Restrict dated fact partitions through this ISO date, plus NULL. '
                              'Does not shift SQL dates; callers must supply queries whose dates fit '
                              'the loaded data. ab coordinates query and data dates.')
+    parser.add_argument('--analyze', choices=['none', 'table', 'column'],
+                        help='Analyze inputs in a fresh catalog and record separate statistics cost.')
     parser.add_argument('--analyze_tables',
                         action='store_true',
                         help='Run ANALYZE TABLE <table> COMPUTE STATISTICS after creating each table.')
@@ -835,4 +874,5 @@ if __name__ == "__main__":
                      args.app_name,
                      args.spark_connect,
                      args.analyze_tables,
-                     args.cutoff_date)
+                     args.cutoff_date,
+                     args.analyze)

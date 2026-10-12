@@ -329,9 +329,14 @@ literals. Direct callers must supply queries whose date windows fit the loaded
 range. ab's unified time-shifting support coordinates query dates with the data
 cutoff.
 
-Cutoff loading uses temporary views and requires a classic Spark session on the
-driver, including distributed Spark, with file-backed inputs. It cannot be combined with Iceberg, Delta, Hive, Spark Connect
-or `--analyze_tables`. Without `--cutoff_date`, loading is unchanged.
+Cutoff loading uses temporary views by default and requires a classic Spark
+session on the driver, including distributed Spark, with file-backed inputs.
+Add `--analyze table` or `--analyze column` to register only the selected partitions
+in a fresh catalog and collect statistics; this requires
+`spark.sql.hive.manageFilesourcePartitions=true`. Statistics time is recorded
+separately from query time. Cutoff loading cannot be combined with Iceberg, Delta,
+external Hive, Spark Connect or the legacy `--analyze_tables` flag.
+Without `--cutoff_date`, loading is unchanged.
 
 
 Arguments supported by `nds_power.py`:
