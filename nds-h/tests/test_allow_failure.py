@@ -5,6 +5,7 @@
 import contextlib
 import csv
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import nds_h_power as driver
 
 
@@ -24,11 +26,10 @@ class AllowFailureTest(unittest.TestCase):
                     session.conf.get.return_value = 'application-test'
                     builder = Mock()
                     builder.appName.return_value.getOrCreate.return_value = session
-                    report = Mock()
-                    report.summary = {'query': 'query1', 'queryStatus': [status],
-                                      'queryTimes': [25]}
-                    report.report_on.return_value = report.summary
-                    report.is_success.return_value = status == 'Completed'
+                    report = driver.PysparkBenchReport(session, 'query1')
+                    report.summary.update({'queryStatus': [status], 'queryTimes': [25],
+                                           'startTime': 123})
+                    report.report_on = Mock(return_value=report.summary)
                     log = Path(directory) / 'times.csv'
                     with patch.object(driver.SparkSession, 'builder', builder), \
                             patch.object(driver, 'setup_tables', side_effect=lambda *args: args[3]), \
@@ -45,7 +46,13 @@ class AllowFailureTest(unittest.TestCase):
                             with self.assertRaises(SystemExit) as stopped:
                                 driver.run_query_stream(*arguments, json_summary_folder=directory)
                             self.assertEqual(stopped.exception.code, int(status != 'Completed'))
-                    self.assertEqual(report.summary['queryStatus'], [status])
+                    summaries = list(Path(directory).glob('*.json'))
+                    self.assertEqual(len(summaries), 1)
+                    with summaries[0].open() as stream:
+                        summary = json.load(stream)
+                    self.assertEqual(summary['query'], 'query1')
+                    self.assertEqual(summary['queryStatus'], [status])
+                    self.assertEqual(summary['queryTimes'], [25])
                     with log.open() as stream:
                         rows = list(csv.reader(stream))
                     self.assertEqual(rows[0], ['application_id', 'query', 'time/milliseconds'])
