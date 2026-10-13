@@ -187,6 +187,7 @@ class CalculateYarnJobCostTest(unittest.TestCase):
             self.assertEqual(row["complete"], "True")
             payload = json.loads(output_json.read_text())
             self.assertEqual("us-west-2", payload["pricing_product_region"])
+            self.assertEqual(str(root), payload["resolved_yarn_log_uri"])
             self.assertEqual(
                 3.0,
                 payload["ec2_ondemand_prices"]["test.1xlarge"]["usd_per_hour"],
@@ -380,7 +381,10 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                 )
                 run.assert_not_called()
 
-            with mock.patch.object(MODULE.subprocess, "run") as run:
+            def fake_download(command, check):
+                (target / "hadoop-yarn-resourcemanager.log").write_text("fixture\n")
+
+            with mock.patch.object(MODULE.subprocess, "run", side_effect=fake_download) as run:
                 self.assertEqual(
                     target,
                     MODULE.materialize_emr_logs(uri, cache, None, refresh=True),
@@ -396,6 +400,44 @@ class CalculateYarnJobCostTest(unittest.TestCase):
                 with self.assertRaises(subprocess.CalledProcessError):
                     MODULE.materialize_emr_logs(uri, cache, None, refresh=True)
                 self.assertFalse(marker.exists())
+
+    def test_yarn_logs_report_the_selected_source_uri(self):
+        shipper_uri = "s3://bucket/shipped/j-TEST"
+        emr_uri = "s3://bucket/logs/j-TEST"
+        cache = Path("/cache")
+
+        def shipped(uri, *args, **kwargs):
+            return Path("/local") / uri.rsplit("/", 2)[-2]
+
+        emr_resolver = mock.Mock(return_value=emr_uri)
+        with mock.patch.object(MODULE, "materialize_emr_logs", side_effect=shipped):
+            self.assertEqual(
+                (Path("/local/shipped"), shipper_uri),
+                MODULE.materialize_yarn_logs(
+                    emr_resolver, cache, None, yarn_log_shipper_uri=shipper_uri
+                ),
+            )
+        emr_resolver.assert_not_called()
+
+        def shipper_empty(uri, *args, **kwargs):
+            if uri == shipper_uri:
+                raise ValueError("No YARN logs downloaded")
+            return shipped(uri)
+
+        with mock.patch.object(MODULE, "materialize_emr_logs", side_effect=shipper_empty):
+            self.assertEqual(
+                (Path("/local/logs"), emr_uri),
+                MODULE.materialize_yarn_logs(
+                    emr_resolver, cache, None, yarn_log_shipper_uri=shipper_uri
+                ),
+            )
+        emr_resolver.assert_called_once()
+
+    def test_cli_rejects_non_s3_yarn_log_shipper_uri(self):
+        argv = [str(SCRIPT), "--event-log-root", "s3://bucket/run", "--yarn-log-shipper-uri", "/var/log"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                MODULE.parse_args()
 
     def test_dominant_resource_cost_includes_gpu_share(self):
         assignment = MODULE.RM_ASSIGN_RE.search(
