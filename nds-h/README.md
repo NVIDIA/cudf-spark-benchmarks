@@ -197,6 +197,10 @@ The listener implementation is binary compatible with both Scala 2.12 and Scala 
 
 _After_ user generates query streams, Power Run can be executed using one of them by submitting `nds_h_power.py` to Spark.
 
+With `--analyze_tables`, discovered file partitions are registered before
+collecting statistics, including NULL partitions. Partitioned and unpartitioned
+file-backed tables expose their input rows through the catalog.
+
 Arguments supported by `nds_h_power.py`:
 
 ```text

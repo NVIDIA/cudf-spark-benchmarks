@@ -328,6 +328,9 @@ Cutoff loading uses temporary views and requires a classic Spark session on the
 driver, including distributed Spark, with file-backed inputs. It cannot be combined with Iceberg, Delta, Hive, Spark Connect
 or `--analyze_tables`. Without `--cutoff_date`, loading is unchanged.
 
+With `--analyze_tables`, discovered file partitions are registered before
+collecting statistics, including NULL partitions. Partitioned and unpartitioned
+file-backed tables expose their input rows through the catalog.
 
 Arguments supported by `nds_power.py`:
 

@@ -90,6 +90,8 @@ def _create_data_source_table(spark_session, table_name, table_path, input_forma
     print(create_sql)
     spark_session.catalog.dropTempView(table_name)
     spark_session.sql(create_sql)
+    if any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
+        spark_session.catalog.recoverPartitions(table_name)
 
 
 DATE_PARTITION_COLUMNS = {
