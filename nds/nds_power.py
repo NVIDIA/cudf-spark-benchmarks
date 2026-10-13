@@ -79,18 +79,43 @@ def _schema_to_ddl(schema):
     ])
 
 
-def _create_data_source_table(spark_session, table_name, table_path, input_format, schema=None):
+def _require_fresh_catalog_table(spark_session, table_name):
+    qualified = "{}.{}".format(_quote_identifier(spark_session.catalog.currentDatabase()),
+                              _quote_identifier(table_name))
+    if spark_session.catalog.tableExists(qualified):
+        raise ValueError("Cutoff loading requires a fresh catalog table: " + table_name)
+
+
+def _create_data_source_table(spark_session, table_name, table_path, input_format, schema=None,
+                              partitions=None, partition_column=None):
+    if partitions is not None:
+        if spark_session.conf.get('spark.sql.hive.manageFilesourcePartitions', 'true').lower() == 'false':
+            raise ValueError('Cutoff catalog tables require spark.sql.hive.manageFilesourcePartitions=true')
+        _require_fresh_catalog_table(spark_session, table_name)
     table_identifier = _quote_identifier(table_name)
     schema_clause = " ({})".format(_schema_to_ddl(schema)) if schema else ""
-    create_sql = "CREATE TABLE IF NOT EXISTS {}{} USING {} LOCATION {}".format(
+    partition_clause = (" PARTITIONED BY ({})".format(_quote_identifier(partition_column))
+                        if partitions is not None else "")
+    create_sql = "CREATE TABLE IF NOT EXISTS {}{} USING {}{} LOCATION {}".format(
         table_identifier,
         schema_clause,
         input_format,
+        partition_clause,
         _quote_sql_string(table_path))
     print(create_sql)
     spark_session.catalog.dropTempView(table_name)
     spark_session.sql(create_sql)
-    if any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
+    if partitions is not None:
+        clauses = [
+            "PARTITION ({}={}) LOCATION {}".format(
+                _quote_identifier(partition_column), _quote_sql_string(value),
+                _quote_sql_string(path))
+            for value, path in partitions
+        ]
+        if clauses:
+            spark_session.sql("ALTER TABLE {} ADD IF NOT EXISTS {}".format(
+                table_identifier, " ".join(clauses)))
+    elif any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
         spark_session.catalog.recoverPartitions(table_name)
 
 
@@ -318,7 +343,7 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
         input_format (str): type of input data source, e.g. parquet, orc, csv, json.
         use_decimal (bool): use decimal type for certain columns when loading data of text type.
         execution_time_list ([(str, str, int)]): a list to record query and its execution time.
-        analyze_tables (bool): whether to compute table statistics after creating TempViews.
+        analyze_tables (bool): whether to register catalog tables and compute table statistics.
         cutoff_date (date): include dated fact partitions through this date, plus NULL.
 
     Returns:
@@ -326,6 +351,9 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
     """
     spark_app_id = _get_app_id(spark_session)
     partitions = {}
+    if cutoff_date is not None and analyze_tables:
+        for table_name in get_schemas(False):
+            _require_fresh_catalog_table(spark_session, table_name)
     if cutoff_date is not None:
         if isinstance(cutoff_date, str):
             cutoff_date = _parse_cutoff_date(cutoff_date)
@@ -344,8 +372,14 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
             reader = reader.schema(schema)
         if table_name in partitions:
             selected = partitions[table_name]
-            reader.option('basePath', table_path).load(
-                [path for _, path in selected]).createOrReplaceTempView(table_name)
+            selected_frame = reader.option('basePath', table_path).load(
+                [path for _, path in selected])
+            if analyze_tables:
+                _create_data_source_table(
+                    spark_session, table_name, table_path, input_format, selected_frame.schema,
+                    selected, DATE_PARTITION_COLUMNS[table_name])
+            else:
+                selected_frame.createOrReplaceTempView(table_name)
         elif analyze_tables:
             _create_data_source_table(spark_session, table_name, table_path, input_format, schema)
         else:
@@ -527,8 +561,8 @@ def run_query_stream(input_prefix,
         analyze_tables (bool, optional): whether to compute table statistics after creating tables.
     """
     if cutoff_date is not None and (input_format in ('iceberg', 'delta') or
-                                    hive_external or spark_connect or analyze_tables):
-        raise ValueError('--cutoff_date requires file-backed inputs, temporary views, '
+                                    hive_external or spark_connect):
+        raise ValueError('--cutoff_date requires file-backed inputs '
                          'and a classic Spark session (not Spark Connect)')
     queries_reports = []
     execution_time_list = []

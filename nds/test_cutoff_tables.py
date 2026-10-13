@@ -91,8 +91,7 @@ class CutoffSelectionTest(unittest.TestCase):
 
     def test_unsupported_inputs_require_classic_spark_before_construction(self):
         for options in ({'input_format': 'iceberg'}, {'input_format': 'delta'},
-                        {'hive_external': True}, {'spark_connect': 'sc://server'},
-                        {'analyze_tables': True}):
+                        {'hive_external': True}, {'spark_connect': 'sc://server'}):
             with self.subTest(options=options), self.assertRaisesRegex(
                     ValueError, 'classic Spark session'):
                 driver.run_query_stream(

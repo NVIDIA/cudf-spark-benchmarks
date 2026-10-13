@@ -324,9 +324,17 @@ The driver cutoff only restricts data; it does not change query text or date
 literals. Direct callers must supply queries whose date windows fit the loaded
 range.
 
-Cutoff loading uses temporary views and requires a classic Spark session on the
-driver, including distributed Spark, with file-backed inputs. It cannot be combined with Iceberg, Delta, Hive, Spark Connect
-or `--analyze_tables`. Without `--cutoff_date`, loading is unchanged.
+Cutoff loading requires a classic Spark session on the driver, including
+distributed Spark, with file-backed inputs. It cannot be combined with Iceberg,
+Delta, external Hive tables or Spark Connect. Without `--cutoff_date`, loading
+is unchanged.
+
+Combine `--cutoff_date` with `--analyze_tables` to register only the selected
+fact partitions, including NULL partitions, before collecting table statistics.
+This requires fresh catalog tables and
+`spark.sql.hive.manageFilesourcePartitions=true`; existing catalog tables are
+rejected so previously registered partitions cannot bypass the cutoff.
+Without analysis, cutoff data is exposed through temporary views.
 
 With `--analyze_tables`, discovered file partitions are registered before
 collecting statistics, including NULL partitions. Partitioned and unpartitioned
