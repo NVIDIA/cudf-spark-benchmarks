@@ -10,10 +10,11 @@ import unittest
 
 from pyspark.sql import SparkSession
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'nds'))
 import nds_power
 
 
-ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'nds-h'))
 spec = importlib.util.spec_from_file_location('nds_h_power', ROOT / 'nds-h/nds_h_power.py')
 nds_h_power = importlib.util.module_from_spec(spec)

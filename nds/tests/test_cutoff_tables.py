@@ -4,12 +4,15 @@
 
 import argparse
 import datetime
+from pathlib import Path
 import contextlib
 import io
 from types import SimpleNamespace
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import nds_power as driver
 
 
