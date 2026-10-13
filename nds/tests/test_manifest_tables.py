@@ -8,11 +8,13 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import DateType, IntegerType, StructField, StructType
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import nds_power
 
 
