@@ -343,6 +343,14 @@ Without `--cutoff_date`, loading is unchanged.
 `--json_summary_folder` is supplied, the analysis cost is also written to
 `statistics/analyze-cost.json`; analysis does not require a summary folder.
 
+A synthetic Parquet dataset can provide `_benchmark_manifest.json` at its root.
+The `tables` object lists table names and each table's `date_partition_column`
+(string or null); it must include `date_dim`. Only listed tables are loaded.
+Cutoff selection uses those date columns and `date_dim`, including NULL partitions;
+each partitioned table must also have a dated partition through the cutoff.
+With `--analyze table|column`, statistics cover the same loaded tables.
+Without a manifest, the normal TPC-DS table selection is unchanged.
+
 Arguments supported by `nds_power.py`:
 
 ```text

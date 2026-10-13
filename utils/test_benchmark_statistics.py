@@ -126,6 +126,8 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                 with self.subTest(driver=folder, mode=mode), tempfile.TemporaryDirectory() as directory:
                     session = Mock()
                     session.conf.get.return_value = 'app'
+                    filesystem = session._jvm.org.apache.hadoop.fs.Path.return_value.getFileSystem.return_value
+                    filesystem.exists.return_value = False
                     builder = Mock()
                     builder.appName.return_value.getOrCreate.return_value = session
                     options = dict(input_prefix='/data', property_file=None, query_dict={},
