@@ -93,6 +93,28 @@ class ManifestTableTest(unittest.TestCase):
             self.spark.catalog.setCurrentDatabase('default')
             self.spark.sql('DROP DATABASE manifest_statistics CASCADE')
 
+    def test_custom_cutoff_legacy_analysis_uses_selected_rows(self):
+        self.spark.sql('CREATE DATABASE manifest_legacy_statistics')
+        self.spark.catalog.setCurrentDatabase('manifest_legacy_statistics')
+        try:
+            names, columns = nds_power._manifest_tables(self.spark, str(self.root), 'parquet')
+            nds_power.setup_tables(
+                self.spark, str(self.root), 'parquet', True, [],
+                cutoff_date=datetime.date(1998, 1, 2),
+                table_names=names, date_partition_columns=columns)
+            self.assertEqual({table.name for table in self.spark.catalog.listTables()}, set(self.tables))
+            for name in ('orders', 'events'):
+                self.assertEqual({row[0] for row in self.spark.table(name).select('payload').collect()},
+                                 {0, 1, 2})
+                statistics = [row[1] for row in self.spark.sql(
+                    'DESCRIBE EXTENDED ' + name).collect() if row[0] == 'Statistics']
+                self.assertEqual(len(statistics), 1)
+                self.assertRegex(statistics[0], r'\b3 rows\b')
+            self.assertEqual(self.spark.table('customers').count(), 2)
+        finally:
+            self.spark.catalog.setCurrentDatabase('default')
+            self.spark.sql('DROP DATABASE manifest_legacy_statistics CASCADE')
+
     def test_manifest_absence_leaves_default_selection_available(self):
         self.assertIsNone(nds_power._manifest_tables(
             self.spark, str(self.root / 'absent'), 'parquet'))
