@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Callable, TextIO
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -514,6 +514,7 @@ def materialize_emr_logs(
     cache_dir: Path,
     aws_profile: str | None,
     refresh: bool = False,
+    markers: tuple[str, ...] = ("hadoop-yarn-nodemanager", "hadoop-yarn-resourcemanager"),
 ) -> Path:
     if not uri.startswith(("s3://", "s3a://", "s3n://")):
         path = Path(uri).expanduser()
@@ -534,24 +535,48 @@ def materialize_emr_logs(
     command = ["aws"]
     if aws_profile:
         command += ["--profile", aws_profile]
-    command += [
-        "s3",
-        "cp",
-        "--recursive",
-        s3_uri.rstrip("/") + "/",
-        str(target),
-        "--exclude",
-        "*",
-        "--include",
-        "*hadoop-yarn-nodemanager*.log*",
-        "--include",
-        "*hadoop-yarn-resourcemanager*.log*",
-    ]
+    command += ["s3", "cp", "--recursive", s3_uri.rstrip("/") + "/", str(target), "--exclude", "*"]
+    for marker_name in markers:
+        command += ["--include", f"*{marker_name}*.log*"]
     subprocess.run(command, check=True)
-    if not relevant_log_files(target):
+    if not any(file.stat().st_size for file in relevant_log_files(target)):
         raise ValueError(f"No YARN logs downloaded from {s3_uri}")
     marker.write_text(s3_uri + "\n")
     return target
+
+
+def materialize_yarn_logs(
+    emr_log_uri: str | Callable[[], str],
+    cache_dir: Path,
+    aws_profile: str | None,
+    refresh: bool = False,
+    yarn_log_shipper_uri: str | None = None,
+) -> tuple[Path, str]:
+    """Materialize ResourceManager/NodeManager logs, preferring a log shipper.
+
+    Returns the local log path and the S3 URI the logs were read from.
+
+    Use yarn_log_shipper_uri when a log shipper uploads ResourceManager logs
+    faster than the EMR log archive. When it contains no ResourceManager
+    logs, the EMR log URI is used instead; pass it as a callable to defer
+    resolving it until that fallback is needed. Shipped logs keep growing while the
+    cluster runs, so they are always re-synced rather than served from cache.
+    """
+    if yarn_log_shipper_uri:
+        try:
+            local_logs = materialize_emr_logs(
+                yarn_log_shipper_uri,
+                cache_dir,
+                aws_profile,
+                refresh=True,
+                markers=("hadoop-yarn-resourcemanager",),
+            )
+            return local_logs, yarn_log_shipper_uri
+        except (ValueError, FileNotFoundError):
+            pass
+    if callable(emr_log_uri):
+        emr_log_uri = emr_log_uri()
+    return materialize_emr_logs(emr_log_uri, cache_dir, aws_profile, refresh=refresh), emr_log_uri
 
 
 def aws_command(aws_profile: str | None, aws_region: str | None = None) -> list[str]:
@@ -1811,6 +1836,11 @@ def merge_test_analyses(
 def run_comparison(args: argparse.Namespace) -> int:
     if not args.event_log_root:
         raise ValueError("--test-event-log-root requires --event-log-root")
+    if args.yarn_log_shipper_uri:
+        raise ValueError(
+            "--yarn-log-shipper-uri names one cluster's logs and cannot be applied to "
+            "a comparison; run each event-log root separately"
+        )
     baseline = analyze_event_root_for_comparison(args.event_log_root, args)
     test_roots = args.test_event_log_root
     test_runs = [
@@ -1962,6 +1992,16 @@ def parse_args() -> argparse.Namespace:
         help="Refresh cached ResourceManager and NodeManager logs from S3",
     )
     parser.add_argument(
+        "--yarn-log-shipper-uri",
+        help=(
+            "Optional S3 prefix holding this cluster's ResourceManager logs from a "
+            "log shipper. Use this when the shipper uploads faster than the EMR log "
+            "archive; falls back to the resolved EMR log URI when it contains no "
+            "ResourceManager logs. Always re-downloaded, never served from cache. "
+            "Not supported with --test-event-log-root."
+        ),
+    )
+    parser.add_argument(
         "--aws-profile",
         default=DEFAULT_AWS_PROFILE,
         help="AWS CLI profile; omit to use the standard credential chain",
@@ -1978,6 +2018,10 @@ def parse_args() -> argparse.Namespace:
         default=Path(".cache/yarn-job-cost/event-metadata"),
     )
     args = parser.parse_args()
+    if args.yarn_log_shipper_uri is not None and not args.yarn_log_shipper_uri.startswith(
+        ("s3://", "s3a://", "s3n://")
+    ):
+        parser.error("--yarn-log-shipper-uri must be an S3 URI")
     args.emr_log_uri = args.yarn_log_root
     return args
 
@@ -1991,6 +2035,7 @@ def main() -> int:
     selected_application_ids: set[str] | None = None
     cluster_id = ""
     emr_log_uri = args.emr_log_uri
+    resolved_emr_log_uri: list[str] = []
     local_event_path: Path | None = None
 
     if args.event_log_root:
@@ -2012,14 +2057,27 @@ def main() -> int:
                 + (", ".join(sorted(cluster_ids)) or "none")
             )
         cluster_id = next(iter(cluster_ids))
-        emr_log_uri = resolve_emr_log_uri(cluster_id, args.aws_profile, args.aws_region)
 
-    local_logs = materialize_emr_logs(
-        emr_log_uri,
+        def emr_log_uri_resolver() -> str:
+            resolved = resolve_emr_log_uri(cluster_id, args.aws_profile, args.aws_region)
+            resolved_emr_log_uri.append(resolved)
+            return resolved
+
+        log_source: str | Callable[[], str] = emr_log_uri_resolver
+    else:
+        log_source = emr_log_uri
+
+    local_logs, resolved_yarn_log_uri = materialize_yarn_logs(
+        log_source,
         args.cache_dir,
         args.aws_profile,
         refresh=args.refresh_emr_log_cache,
+        yarn_log_shipper_uri=args.yarn_log_shipper_uri,
     )
+    if resolved_emr_log_uri:
+        emr_log_uri = resolved_emr_log_uri[0]
+    elif args.event_log_root:
+        emr_log_uri = ""  # LogUri lookup skipped: the log shipper supplied the logs
     evidence = parse_yarn_logs(local_logs)
     mode = calculator_mode(evidence.calculator_class)
     metadata = {app_id: app.as_metadata() for app_id, app in event_metadata.items()}
@@ -2073,6 +2131,8 @@ def main() -> int:
             "local_event_metadata_path": str(local_event_path) if local_event_path else "",
             "emr_cluster_id": cluster_id,
             "emr_log_uri": emr_log_uri,
+            "yarn_log_shipper_uri": args.yarn_log_shipper_uri or "",
+            "resolved_yarn_log_uri": resolved_yarn_log_uri,
             "local_log_path": str(local_logs),
             "resource_calculator": mode,
             "detected_resource_calculator_class": evidence.calculator_class,

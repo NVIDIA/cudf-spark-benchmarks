@@ -17,14 +17,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Iterable
 
-
+from yarn_job_cost_checkpoint import EventCheckpoints, stream_identity
 from yarn_job_cost_eventlog import (
     EventLogCodec,
     EventLogReadError,
     iter_eventlog_streams,
     iter_text_lines,
 )
-
 
 APPLICATION_ID_RE = re.compile(r"application_\d+_\d+")
 EVENTLOG_DIRECTORY_RE = re.compile(r"(eventlog_v2_(application_\d+_\d+))/")
@@ -269,10 +268,23 @@ def _iter_application_event_lines(
         application.task_metric_warnings.append(warning)
 
 
-def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
+def read_event_log_metadata(
+    path: Path,
+    *,
+    check_timeout=lambda: None,
+    checkpoints: EventCheckpoints | None = None,
+) -> dict[str, EventLogApplication]:
     applications: dict[str, EventLogApplication] = {}
     by_directory: dict[str, EventLogApplication] = {}
     for app_dir, member_name, stream, codec in iter_eventlog_streams(path):
+        check_timeout()
+        identity = stream_identity(stream, path) if checkpoints else None
+        if checkpoints:
+            checkpoints.advance(app_dir, member_name, identity)
+            cached = checkpoints.load(EventLogApplication, SparkExecutor)
+            if cached is not None and identity == stream_identity(stream, path):
+                by_directory[app_dir] = cached
+                continue
         application_match = APPLICATION_ID_RE.search(app_dir)
         current = by_directory.setdefault(
             app_dir,
@@ -288,6 +300,7 @@ def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
         for line in _iter_application_event_lines(
             stream, codec, member_name, current
         ):
+            check_timeout()
             if not line:
                 continue
             try:
@@ -404,6 +417,13 @@ def read_event_log_metadata(path: Path) -> dict[str, EventLogApplication]:
                     if "rewrite" in current.application_name.lower():
                         job_id += 900000
                     current.job_id = str(job_id)
+        if checkpoints:
+            if identity != stream_identity(stream, path):
+                current.event_log_read_errors.append("Event-log segment changed while being read")
+            if current.event_log_read_errors:
+                # Do not memoize read failures or any state derived from them.
+                checkpoints.usable = False
+            checkpoints.save(current)
     for current in by_directory.values():
         if current.application_id:
             applications[current.application_id] = current

@@ -206,6 +206,10 @@ is still counted in `Power Test Time`.
 Setup and infrastructure errors still fail the run; the flag only changes
 the final exit status for reported query/task failures.
 
+With `--analyze_tables`, discovered file partitions are registered before
+collecting statistics, including NULL partitions. Partitioned and unpartitioned
+file-backed tables expose their input rows through the catalog.
+
 Arguments supported by `nds_h_power.py`:
 
 ```text
