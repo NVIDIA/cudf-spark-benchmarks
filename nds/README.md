@@ -313,10 +313,6 @@ The listener implementation is binary compatible with both Scala 2.12 and Scala 
 
 _After_ user generates query streams, Power Run can be executed using one of them by submitting `nds_power.py` to Spark.
 
-With `--analyze_tables`, discovered file partitions are registered before
-collecting statistics, including NULL partitions. Partitioned and unpartitioned
-file-backed tables expose their input rows through the catalog.
-
 `nds_power.py --cutoff_date 2001-07-01` loads only fact partitions whose date keys
 map to that date or earlier in `date_dim`, including NULL-date partitions. Dimension
 tables are read in full. The facts must use the partition layout listed above;
@@ -328,19 +324,28 @@ The driver cutoff only restricts data; it does not change query text or date
 literals. Direct callers must supply queries whose date windows fit the loaded
 range.
 
-Cutoff loading uses temporary views by default and requires a classic Spark
-session on the driver, including distributed Spark, with file-backed inputs.
-Add `--analyze table` or `--analyze column` to register only the selected partitions
-in a fresh catalog and collect statistics; this requires
-`spark.sql.hive.manageFilesourcePartitions=true`. Statistics time is recorded
-separately from query time. Cutoff loading cannot be combined with Iceberg, Delta,
-external Hive, Spark Connect or the legacy `--analyze_tables` flag.
-Without `--cutoff_date`, loading is unchanged.
+Cutoff loading requires a classic Spark session on the driver, including
+distributed Spark, with file-backed inputs. It cannot be combined with Iceberg,
+Delta, external Hive tables or Spark Connect. Without `--cutoff_date`, loading
+is unchanged.
 
+Combine `--cutoff_date` with `--analyze_tables` to register only the selected
+fact partitions, including NULL partitions, before collecting table statistics.
+This requires fresh catalog tables and
+`spark.sql.hive.manageFilesourcePartitions=true`; existing catalog tables are
+rejected so previously registered partitions cannot bypass the cutoff.
+Without analysis, cutoff data is exposed through temporary views.
 
-`--analyze none|table|column` records a separate statistics time. When
-`--json_summary_folder` is supplied, the analysis cost is also written to
-`statistics/analyze-cost.json`; analysis does not require a summary folder.
+With `--analyze_tables`, discovered file partitions are registered before
+collecting statistics, including NULL partitions. Partitioned and unpartitioned
+file-backed tables expose their input rows through the catalog.
+
+`--analyze none|table|column` uses a fresh catalog and records a separate
+statistics time. Table and column modes register only selected partitions when
+`--cutoff_date` is supplied. This option cannot be combined with
+`--analyze_tables`. When `--json_summary_folder` is supplied, the analysis cost is
+also written to `statistics/analyze-cost.json`; analysis does not require a
+summary folder.
 
 Arguments supported by `nds_power.py`:
 

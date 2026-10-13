@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Benchmark Python checks
+
+on:
+  pull_request:
+    paths:
+      - "nds/**"
+      - "nds-h/**"
+      - "utils/**"
+      - ".github/workflows/benchmark-python.yml"
+  push:
+    branches: [dev]
+    paths:
+      - "nds/**"
+      - "nds-h/**"
+      - "utils/**"
+      - ".github/workflows/benchmark-python.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SPARK_LOCAL_IP: "127.0.0.1"
+      PYSPARK_PYTHON: python
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install dependencies
+        run: python -m pip install pyspark==3.5.5
+      - name: NDS CPU Spark unit tests
+        run: python -m unittest discover -s nds -p 'test*.py'
+      - name: NDS-H CPU Spark unit tests
+        run: python -m unittest discover -s nds-h -p 'test*.py'
+      - name: Shared utility unit tests
+        run: python -m unittest discover -s utils -p 'test*.py'

@@ -82,7 +82,8 @@ class BenchmarkStatisticsTest(unittest.TestCase):
     def test_selected_catalog_registration_keeps_root_recovery_disabled(self):
         driver = load_driver('nds', 'nds_power.py')
         catalog = SimpleNamespace(
-            tableExists=lambda name: False, dropTempView=lambda name: None,
+            tableExists=lambda name: False, currentDatabase=lambda: 'default',
+            dropTempView=lambda name: None,
             recoverPartitions=Mock(side_effect=AssertionError('Would load unselected partitions')))
         session = SimpleNamespace(catalog=catalog, sql=Mock(),
                                   conf=SimpleNamespace(get=lambda *args: 'true'))
@@ -94,7 +95,6 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                 partition_column='day_key')
         self.assertNotIn('/facts/day_key=', output.getvalue())
         catalog.tableExists = lambda name: True
-        catalog.getTable = lambda name: SimpleNamespace(isTemporary=False)
         with self.assertRaisesRegex(ValueError, 'fresh catalog'):
             driver._create_data_source_table(
                 session, 'facts', '/facts', 'parquet', partitions=[('2', '/facts/day_key=2')],
