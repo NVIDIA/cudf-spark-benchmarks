@@ -313,9 +313,9 @@ The listener implementation is binary compatible with both Scala 2.12 and Scala 
 
 _After_ user generates query streams, Power Run can be executed using one of them by submitting `nds_power.py` to Spark.
 
-`nds_power.py --cutoff_date 2001-07-01` loads only fact partitions whose date keys
-map to that date or earlier in `date_dim`, including NULL-date partitions. Dimension
-tables are read in full. The facts must use the partition layout listed above;
+`nds_power.py --cutoff_date 2001-07-01` loads fact partitions whose date keys
+map to dates on or before the cutoff in `date_dim`. NULL-date partitions are always
+included, regardless of the cutoff. Dimension tables are read in full. The facts must use the partition layout listed above;
 unknown date keys and unexpected layouts are rejected. Each fact table must
 have at least one dated partition at or before the cutoff, even when it has a
 NULL-date partition.

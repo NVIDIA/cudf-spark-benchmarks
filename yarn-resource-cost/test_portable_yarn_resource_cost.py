@@ -106,6 +106,70 @@ class AdapterTest(unittest.TestCase):
 
 
 class PortableCliTest(unittest.TestCase):
+    def test_reported_nodes_ignore_daemon_log_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rm_log = (FIXTURE / "yarn" / "hadoop-yarn-resourcemanager-rm.log").read_text(
+                encoding="utf-8"
+            ).replace(
+                "registered with capability: <memory:8192, vCores:8>",
+                "registered with capability: <memory:8192, vCores:8, "
+                "yarn.io/gpu:1> instanceType(STRING)=g4dn.4xlarge",
+            )
+            rm_log += (
+                "2026-01-01 00:00:00,200 INFO RMNodeImpl: NodeManager from node "
+                "worker2(cmPort: 8041 httpPort: 8042) registered with capability: "
+                "<memory:8192, vCores:8, yarn.io/gpu:1> "
+                "instanceType(STRING)=g4dn.4xlarge\n"
+            )
+            full_logs = root / "full" / "hadoop-yarn"
+            filtered_logs = root / "filtered" / "ip-master"
+            for log_dir in (full_logs, filtered_logs):
+                log_dir.mkdir(parents=True)
+                (log_dir / "hadoop-yarn-resourcemanager.log").write_text(
+                    rm_log, encoding="utf-8"
+                )
+            (full_logs / "hadoop-yarn-nodemanager.log").write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker1:8041 with total resource of "
+                "<memory:8192, vCores:8, yarn.io/gpu:1> "
+                "instanceType(STRING)=g4dn.4xlarge\n",
+                encoding="utf-8",
+            )
+
+            outputs = []
+            for log_dir in (full_logs, filtered_logs):
+                output = root / f"{log_dir.parent.name}.json"
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-S",
+                        str(SCRIPT),
+                        "--adapter",
+                        "on-prem",
+                        "--event-log-root",
+                        str(FIXTURE),
+                        "--yarn-log-root",
+                        str(log_dir),
+                        "--node-class-map",
+                        str(FIXTURE / "node-classes.json"),
+                        "--output-json",
+                        str(output),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                outputs.append(json.loads(output.read_text(encoding="utf-8")))
+
+        self.assertEqual(outputs[0]["applications"], outputs[1]["applications"])
+        self.assertEqual(outputs[0]["summary"], outputs[1]["summary"])
+        self.assertTrue(outputs[0]["applications"][0]["complete"])
+        for output in outputs:
+            self.assertEqual({"worker1", "worker2"}, set(output["nodes"]))
+            self.assertEqual(1, output["nodes"]["worker1"]["resources"]["yarn.io/gpu"])
+            self.assertEqual(1, output["nodes"]["worker2"]["resources"]["yarn.io/gpu"])
+
     def test_entry_point_formats_expected_errors(self):
         completed = subprocess.run(
             [
