@@ -4,8 +4,11 @@
 
 import argparse
 import datetime
+import contextlib
+import io
 from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 import nds_power as driver
 
@@ -39,6 +42,35 @@ def partition_session(entries):
 
 
 class CutoffSelectionTest(unittest.TestCase):
+    def test_cutoff_setup_time_covers_mapping_and_partition_selection_only_when_requested(self):
+        for analyze in (False, True):
+            for cutoff in (None, datetime.date(2001, 1, 2)):
+                with self.subTest(analyze=analyze, cutoff=cutoff):
+                    session = Mock()
+                    session.conf.get.return_value = 'application-test'
+                    session.catalog.currentDatabase.return_value = 'default'
+                    session.catalog.tableExists.return_value = False
+                    clock = [1000.0]
+
+                    def map_dates(*args):
+                        clock[0] += 0.125
+                        return {}
+
+                    def select_partitions(*args):
+                        clock[0] += 0.250
+                        return [('1', '/facts/date=1')]
+
+                    with patch.object(driver.time, 'time', side_effect=lambda: clock[0]), \
+                            patch.object(driver, '_date_key_mapping', side_effect=map_dates), \
+                            patch.object(driver, '_partitions_at_cutoff', side_effect=select_partitions), \
+                            patch.object(driver, '_create_data_source_table'), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        timings = driver.setup_tables(session, '/facts', 'parquet', False, [],
+                                                      analyze_tables=analyze, cutoff_date=cutoff)
+                    preparation = [row for row in timings if row[1] == 'Power Cutoff Setup Time']
+                    self.assertEqual(preparation, [] if cutoff is None else
+                                     [('application-test', 'Power Cutoff Setup Time', 1875)])
+
     def test_selects_cutoff_inclusively_and_keeps_null_partitions(self):
         entries = [('ss_sold_date_sk=3', True), ('_SUCCESS', False),
                    ('ss_sold_date_sk=1', True), ('.hidden', False),

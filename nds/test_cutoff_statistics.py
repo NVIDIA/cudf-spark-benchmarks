@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Check selected input rows and legacy table statistics with real Spark."""
 
+import csv
 import datetime
+from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
 
 from pyspark.sql import SparkSession
+from pyspark.sql.types import DateType, DecimalType, IntegerType, LongType
 
 import nds_power as driver
+import nds_transcode
 
 
 class CutoffStatisticsTest(unittest.TestCase):
@@ -20,6 +24,7 @@ class CutoffStatisticsTest(unittest.TestCase):
         cls.spark = (SparkSession.builder.master('local[2]').appName('cutoff-statistics-tests')
                      .config('spark.ui.enabled', 'false')
                      .config('spark.sql.shuffle.partitions', '1')
+                     .config('spark.sql.legacy.charVarcharAsString', 'true')
                      .config('spark.sql.catalogImplementation', 'in-memory')
                      .config('spark.sql.hive.manageFilesourcePartitions', 'true')
                      .config('spark.sql.warehouse.dir', str(cls.root / 'warehouse'))
@@ -80,6 +85,76 @@ class CutoffStatisticsTest(unittest.TestCase):
                 self.assertTrue(self.spark.catalog.getTable(name).isTemporary)
                 self.assertEqual(self.spark.table(name).count(), 3)
         self.assertEqual(self.spark.table('customer').count(), 2)
+
+    @classmethod
+    def create_text_inputs(cls):
+        """Convert tiny pipe-delimited source rows with the complete NDS schemas."""
+        cls.text_rows = {}
+        source = cls.root / 'text-source'
+        source.mkdir()
+        for name, schema in driver.get_schemas(True).items():
+            rows = []
+            count = 4 if name in driver.DATE_PARTITION_COLUMNS else 3
+            for key in range(1, count + 1):
+                values = {}
+                for position, field in enumerate(schema):
+                    if isinstance(field.dataType, (IntegerType, LongType)):
+                        value = key * 100 + position
+                    elif isinstance(field.dataType, DecimalType):
+                        value = Decimal(key) + Decimal(position) / 100
+                    elif isinstance(field.dataType, DateType):
+                        value = datetime.date(2001, 1, key)
+                    else:
+                        value = 'v' + str(key) + '_' + str(position)
+                    values[field.name] = value
+                if name == 'date_dim':
+                    values['d_date_sk'] = key
+                if name in driver.DATE_PARTITION_COLUMNS:
+                    values[driver.DATE_PARTITION_COLUMNS[name]] = key if key < 4 else None
+                rows.append(values)
+            cls.text_rows[name] = rows
+            with (source / name).open('w', newline='') as stream:
+                writer = csv.writer(stream, delimiter='|')
+                writer.writerows([row[field.name] for field in schema] for row in rows)
+            frame = nds_transcode.load(cls.spark, name, schema, 'csv', prefix=str(source))
+            for input_format in ('csv', 'json'):
+                nds_transcode.store(cls.spark, frame, name, input_format, 'overwrite',
+                                    'parquet', None, prefix=str(cls.root / input_format))
+
+    def assert_text_cutoff(self, input_format, analyze_tables):
+        if not hasattr(self, 'text_rows'):
+            self.create_text_inputs()
+        driver.setup_tables(self.spark, str(self.root / input_format), input_format, True, [],
+                            analyze_tables=analyze_tables, cutoff_date=datetime.date(2001, 1, 2))
+        for name, schema in driver.get_schemas(True).items():
+            with self.subTest(format=input_format, analysis=analyze_tables, table=name):
+                frame = self.spark.table(name)
+                actual = {tuple(row[field.name] for field in schema) for row in frame.collect()}
+                expected_rows = self.text_rows[name]
+                if name in driver.DATE_PARTITION_COLUMNS:
+                    column = driver.DATE_PARTITION_COLUMNS[name]
+                    expected_rows = [row for row in expected_rows if row[column] in (1, 2, None)]
+                    self.assertEqual(frame.schema[column].dataType, schema[column].dataType)
+                expected = {tuple(row[field.name] for field in schema) for row in expected_rows}
+                self.assertEqual(actual, expected)
+                self.assertEqual(self.spark.catalog.getTable(name).isTemporary, not analyze_tables)
+                for field in schema:
+                    if isinstance(field.dataType, (DateType, DecimalType, IntegerType, LongType)):
+                        self.assertEqual(frame.schema[field.name].dataType, field.dataType)
+                if analyze_tables:
+                    self.assert_row_statistics(name, len(expected_rows))
+
+    def test_csv_cutoff_preserves_values_in_temporary_views(self):
+        self.assert_text_cutoff('csv', False)
+
+    def test_csv_cutoff_preserves_values_and_catalog_statistics(self):
+        self.assert_text_cutoff('csv', True)
+
+    def test_json_cutoff_preserves_values_in_temporary_views(self):
+        self.assert_text_cutoff('json', False)
+
+    def test_json_cutoff_preserves_values_and_catalog_statistics(self):
+        self.assert_text_cutoff('json', True)
 
     def test_existing_table_is_not_reused_or_changed_by_cutoff_analysis(self):
         driver._create_data_source_table(self.spark, 'store_sales',
