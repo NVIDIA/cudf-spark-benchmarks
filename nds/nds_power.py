@@ -104,7 +104,10 @@ DATE_PARTITION_COLUMNS = {
 
 
 def _parse_cutoff_date(value):
-    return datetime.datetime.strptime(value, '%Y-%m-%d').date()
+    try:
+        return datetime.datetime.strptime(value, '%Y-%m-%d').date()
+    except ValueError:
+        raise argparse.ArgumentTypeError("Expected a cutoff date in YYYY-MM-DD format: {!r}".format(value))
 
 
 def _date_key_mapping(spark_session, input_prefix, input_format, use_decimal):
@@ -127,6 +130,7 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, dates, cu
     path = spark_session._jvm.org.apache.hadoop.fs.Path(table_path)
     filesystem = path.getFileSystem(spark_session.sparkContext._jsc.hadoopConfiguration())
     partitions = []
+    has_dated_partition = False
     for entry in filesystem.listStatus(path):
         name = entry.getPath().getName()
         if name.startswith(('_', '.')):
@@ -144,9 +148,10 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, dates, cu
                 raise ValueError("Partition date key missing from date_dim: " + value)
             if dates[key] > cutoff_date:
                 continue
+            has_dated_partition = True
         partitions.append((value, entry.getPath().toString()))
-    if not partitions:
-        raise ValueError("No partitions at or before {} in {}".format(cutoff_date, table_path))
+    if not has_dated_partition:
+        raise ValueError("No dated partitions at or before {} in {}".format(cutoff_date, table_path))
     return sorted(partitions)
 
 
@@ -522,7 +527,7 @@ def run_query_stream(input_prefix,
     if cutoff_date is not None and (input_format in ('iceberg', 'delta') or
                                     hive_external or spark_connect or analyze_tables):
         raise ValueError('--cutoff_date requires file-backed inputs, temporary views, '
-                         'and a local Spark session')
+                         'and a classic Spark session (not Spark Connect)')
     queries_reports = []
     execution_time_list = []
     total_time_start = time.time()
