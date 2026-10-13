@@ -382,16 +382,20 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
                               date_partition_columns)
     spark_app_id = _get_app_id(spark_session)
     partitions = {}
-    if cutoff_date is not None and analyze_tables:
-        for table_name in table_names:
-            _require_fresh_catalog_table(spark_session, table_name)
     if cutoff_date is not None:
+        start = int(time.time() * 1000)
+        if analyze_tables:
+            for table_name in table_names:
+                _require_fresh_catalog_table(spark_session, table_name)
         if isinstance(cutoff_date, str):
             cutoff_date = _parse_cutoff_date(cutoff_date)
         dates = _date_key_mapping(spark_session, input_prefix, input_format, use_decimal)
         for table_name, column in date_partition_columns.items():
             partitions[table_name] = _partitions_at_cutoff(
                 spark_session, input_prefix + '/' + table_name, column, dates, cutoff_date)
+        cutoff_setup_time = int(time.time() * 1000) - start
+        print("====== Power Cutoff Setup Time: {} milliseconds ======".format(cutoff_setup_time))
+        execution_time_list.append((spark_app_id, "Power Cutoff Setup Time", cutoff_setup_time))
     # Create TempViews or data source tables
     for table_name in table_names:
         start = int(time.time() * 1000)
