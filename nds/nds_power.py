@@ -725,7 +725,7 @@ if __name__ == "__main__":
     parser.add_argument('--cutoff_date', type=_parse_cutoff_date,
                         help='Restrict dated fact partitions through this ISO date, plus NULL. '
                              'Does not shift SQL dates; callers must supply queries whose dates fit '
-                             'the loaded data. ab coordinates query and data dates.')
+                             'the loaded data.')
     parser.add_argument('--analyze_tables',
                         action='store_true',
                         help='Run ANALYZE TABLE <table> COMPUTE STATISTICS after creating each table.')

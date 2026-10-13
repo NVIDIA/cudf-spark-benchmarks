@@ -326,8 +326,7 @@ NULL-date partition.
 
 The driver cutoff only restricts data; it does not change query text or date
 literals. Direct callers must supply queries whose date windows fit the loaded
-range. ab's unified time-shifting support coordinates query dates with the data
-cutoff.
+range.
 
 Cutoff loading uses temporary views and requires a classic Spark session on the
 driver, including distributed Spark, with file-backed inputs. It cannot be combined with Iceberg, Delta, Hive, Spark Connect
