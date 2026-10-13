@@ -7,11 +7,13 @@ import datetime
 from decimal import Decimal
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import DateType, DecimalType, IntegerType, LongType
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import nds_power as driver
 import nds_transcode
 
