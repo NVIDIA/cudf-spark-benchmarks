@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install pyspark==3.5.5
       - name: NDS CPU Spark unit tests
-        run: python -m unittest discover -s nds -p 'test*.py'
+        run: python -m unittest discover -s nds/tests -p 'test*.py'
       - name: NDS-H CPU Spark unit tests
         run: python -m unittest discover -s nds-h -p 'test*.py'
       - name: Shared utility unit tests
