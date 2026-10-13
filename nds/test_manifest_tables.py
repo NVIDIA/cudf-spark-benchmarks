@@ -99,8 +99,8 @@ class ManifestTableTest(unittest.TestCase):
         try:
             names, columns = nds_power._manifest_tables(self.spark, str(self.root), 'parquet')
             nds_power.setup_tables(
-                self.spark, str(self.root), 'parquet', True, [],
-                cutoff_date=datetime.date(1998, 1, 2),
+                self.spark, str(self.root), 'parquet', False, [],
+                analyze_tables=True, cutoff_date=datetime.date(1998, 1, 2),
                 table_names=names, date_partition_columns=columns)
             self.assertEqual({table.name for table in self.spark.catalog.listTables()}, set(self.tables))
             for name in ('orders', 'events'):
