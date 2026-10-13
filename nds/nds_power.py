@@ -32,6 +32,7 @@
 
 import argparse
 import csv
+import datetime
 import os
 import re
 import sys
@@ -91,6 +92,69 @@ def _create_data_source_table(spark_session, table_name, table_path, input_forma
     spark_session.sql(create_sql)
     if any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
         spark_session.catalog.recoverPartitions(table_name)
+
+
+DATE_PARTITION_COLUMNS = {
+    'store_sales': 'ss_sold_date_sk',
+    'catalog_sales': 'cs_sold_date_sk',
+    'web_sales': 'ws_sold_date_sk',
+    'store_returns': 'sr_returned_date_sk',
+    'catalog_returns': 'cr_returned_date_sk',
+    'web_returns': 'wr_returned_date_sk',
+    'inventory': 'inv_date_sk',
+}
+
+
+def _parse_cutoff_date(value):
+    try:
+        return datetime.datetime.strptime(value, '%Y-%m-%d').date()
+    except ValueError:
+        raise argparse.ArgumentTypeError("Expected a cutoff date in YYYY-MM-DD format: {!r}".format(value))
+
+
+def _date_key_mapping(spark_session, input_prefix, input_format, use_decimal):
+    reader = spark_session.read.format(input_format)
+    if input_format in ['csv', 'json']:
+        reader = reader.schema(get_schemas(use_decimal)['date_dim'])
+    dates = {}
+    for row in reader.load(input_prefix + '/date_dim').select('d_date_sk', 'd_date').collect():
+        if row.d_date_sk is None or row.d_date is None:
+            raise ValueError("date_dim contains a NULL date key or date")
+        date = (row.d_date if isinstance(row.d_date, datetime.date) else
+                _parse_cutoff_date(row.d_date))
+        if row.d_date_sk in dates and dates[row.d_date_sk] != date:
+            raise ValueError("date_dim has ambiguous key " + str(row.d_date_sk))
+        dates[row.d_date_sk] = date
+    return dates
+
+
+def _partitions_at_cutoff(spark_session, table_path, partition_column, dates, cutoff_date):
+    path = spark_session._jvm.org.apache.hadoop.fs.Path(table_path)
+    filesystem = path.getFileSystem(spark_session.sparkContext._jsc.hadoopConfiguration())
+    partitions = []
+    has_dated_partition = False
+    for entry in filesystem.listStatus(path):
+        name = entry.getPath().getName()
+        if name.startswith(('_', '.')):
+            continue
+        prefix = partition_column + '='
+        if not entry.isDirectory() or not name.startswith(prefix):
+            raise ValueError("Unexpected partition layout at " + entry.getPath().toString())
+        value = name[len(prefix):]
+        if value != '__HIVE_DEFAULT_PARTITION__':
+            try:
+                key = int(value)
+            except ValueError:
+                raise ValueError("Invalid date partition at " + entry.getPath().toString())
+            if key not in dates:
+                raise ValueError("Partition date key missing from date_dim: " + value)
+            if dates[key] > cutoff_date:
+                continue
+            has_dated_partition = True
+        partitions.append((value, entry.getPath().toString()))
+    if not has_dated_partition:
+        raise ValueError("No dated partitions at or before {} in {}".format(cutoff_date, table_path))
+    return sorted(partitions)
 
 
 def split_and_strip(str, delimiter):
@@ -245,7 +309,7 @@ def gen_sql_from_stream(query_stream_file_path):
     return extended_queries
 
 def setup_tables(spark_session, input_prefix, input_format, use_decimal, execution_time_list,
-                 analyze_tables=False):
+                 analyze_tables=False, cutoff_date=None):
     """set up data tables in Spark before running the Power Run queries.
 
     Args:
@@ -255,11 +319,20 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
         use_decimal (bool): use decimal type for certain columns when loading data of text type.
         execution_time_list ([(str, str, int)]): a list to record query and its execution time.
         analyze_tables (bool): whether to compute table statistics after creating TempViews.
+        cutoff_date (date): include dated fact partitions through this date, plus NULL.
 
     Returns:
         execution_time_list: a list recording query execution time.
     """
     spark_app_id = _get_app_id(spark_session)
+    partitions = {}
+    if cutoff_date is not None:
+        if isinstance(cutoff_date, str):
+            cutoff_date = _parse_cutoff_date(cutoff_date)
+        dates = _date_key_mapping(spark_session, input_prefix, input_format, use_decimal)
+        for table_name, column in DATE_PARTITION_COLUMNS.items():
+            partitions[table_name] = _partitions_at_cutoff(
+                spark_session, input_prefix + '/' + table_name, column, dates, cutoff_date)
     # Create TempViews or data source tables
     for table_name in get_schemas(False).keys():
         start = int(time.time() * 1000)
@@ -269,7 +342,11 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
         if input_format in ['csv', 'json']:
             schema = get_schemas(use_decimal)[table_name]
             reader = reader.schema(schema)
-        if analyze_tables:
+        if table_name in partitions:
+            selected = partitions[table_name]
+            reader.option('basePath', table_path).load(
+                [path for _, path in selected]).createOrReplaceTempView(table_name)
+        elif analyze_tables:
             _create_data_source_table(spark_session, table_name, table_path, input_format, schema)
         else:
             reader.load(table_path).createOrReplaceTempView(table_name)
@@ -432,7 +509,7 @@ def run_query_stream(input_prefix,
                      skip_execution=False,
                      app_name=None,
                      spark_connect=None,
-                     analyze_tables=False):
+                     analyze_tables=False, cutoff_date=None):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. TempView Creation time is also recorded.
 
@@ -449,6 +526,10 @@ def run_query_stream(input_prefix,
         to "parquet".
         analyze_tables (bool, optional): whether to compute table statistics after creating tables.
     """
+    if cutoff_date is not None and (input_format in ('iceberg', 'delta') or
+                                    hive_external or spark_connect or analyze_tables):
+        raise ValueError('--cutoff_date requires file-backed inputs, temporary views, '
+                         'and a classic Spark session (not Spark Connect)')
     queries_reports = []
     execution_time_list = []
     total_time_start = time.time()
@@ -488,7 +569,7 @@ def run_query_stream(input_prefix,
     if input_format != 'iceberg' and input_format != 'delta' and not hive_external:
         execution_time_list = setup_tables(spark_session, input_prefix, input_format, use_decimal,
                                            execution_time_list,
-                                           analyze_tables)
+                                           analyze_tables, cutoff_date)
 
     check_json_summary_folder(json_summary_folder)
     if sub_queries:
@@ -641,6 +722,10 @@ if __name__ == "__main__":
                         'for more details.',
                         choices=['parquet', 'orc', 'avro', 'csv', 'json', 'iceberg', 'delta'],
                         default='parquet')
+    parser.add_argument('--cutoff_date', type=_parse_cutoff_date,
+                        help='Restrict dated fact partitions through this ISO date, plus NULL. '
+                             'Does not shift SQL dates; callers must supply queries whose dates fit '
+                             'the loaded data. ab coordinates query and data dates.')
     parser.add_argument('--analyze_tables',
                         action='store_true',
                         help='Run ANALYZE TABLE <table> COMPUTE STATISTICS after creating each table.')
@@ -749,4 +834,5 @@ if __name__ == "__main__":
                      args.skip_execution,
                      args.app_name,
                      args.spark_connect,
-                     args.analyze_tables)
+                     args.analyze_tables,
+                     args.cutoff_date)
