@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -48,7 +49,8 @@ class FakeS3Client:
         return FakePaginator(self.objects)
 
     def get_object(self, **kwargs):
-        return {"Body": io.BytesIO(self.objects[kwargs["Key"]])}
+        content = self.objects[kwargs["Key"]]
+        return {"Body": io.BytesIO(content), "ContentLength": len(content)}
 
 
 class FakeEmrClient:
@@ -103,6 +105,90 @@ class YarnJobCostApiTest(unittest.TestCase):
         self.assertEqual(1, result.container_count)
         self.assertEqual(2, result.expected_container_count)
 
+    def test_legacy_yarn_download_accepts_log_replaced_after_listing(self):
+        key = (
+            "emr-logs/j-TEST/node/i-1/applications/"
+            "hadoop-yarn-resourcemanager-rm.log"
+        )
+
+        class ReplacedBeforeGetS3(FakeS3Client):
+            def __init__(self, objects):
+                super().__init__(objects)
+                self.get_requests = []
+                self.listings = 0
+
+            def get_paginator(self, operation):
+                if operation != "list_objects_v2":
+                    raise AssertionError(operation)
+                return self
+
+            def paginate(self, **kwargs):
+                old_log = self.objects[key]
+                listed = {
+                    "Key": key,
+                    "Size": len(old_log),
+                    "ETag": f"version-{self.listings}",
+                }
+                self.listings += 1
+                # EMR can replace an active log after the full archive listing.
+                self.objects[key] = old_log + b"\n"
+                yield {"Contents": [listed]}
+
+            def get_object(self, **kwargs):
+                self.get_requests.append(kwargs)
+                if kwargs.get("IfMatch"):
+                    class PreconditionFailed(Exception):
+                        response = {"Error": {"Code": "PreconditionFailed"}}
+
+                    raise PreconditionFailed()
+                content = self.objects[kwargs["Key"]]
+                return {"Body": io.BytesIO(content), "ContentLength": len(content)}
+
+        s3 = ReplacedBeforeGetS3({key: self.yarn_log_with_instance_type().encode()})
+        for _ in range(2):
+            result = calculate_emr_application_usage(
+                self.request(), emr_client=FakeEmrClient(), s3_client=s3
+            )
+            self.assertTrue(result.complete)
+            self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+        self.assertEqual(2, s3.listings)
+        self.assertTrue(all("IfMatch" not in request for request in s3.get_requests))
+
+    def test_legacy_yarn_download_rejects_short_get_body(self):
+        key = (
+            "emr-logs/j-TEST/node/i-1/applications/"
+            "hadoop-yarn-resourcemanager-rm.log"
+        )
+
+        class ShortReadS3(FakeS3Client):
+            def get_object(self, **kwargs):
+                content = self.objects[kwargs["Key"]]
+                return {"Body": io.BytesIO(content[:-1]), "ContentLength": len(content)}
+
+        s3 = ShortReadS3({key: self.yarn_log_with_instance_type().encode()})
+        result = calculate_emr_application_usage(
+            self.request(), emr_client=FakeEmrClient(), s3_client=s3
+        )
+        self.assertFalse(result.complete)
+        self.assertTrue(result.retryable)
+        self.assertIn("download length differs", result.warnings[0])
+
+    def test_legacy_yarn_download_rejects_body_only_client(self):
+        key = (
+            "emr-logs/j-TEST/node/i-1/applications/"
+            "hadoop-yarn-resourcemanager-rm.log"
+        )
+
+        class BodyOnlyS3(FakeS3Client):
+            def get_object(self, **kwargs):
+                return {"Body": io.BytesIO(self.objects[kwargs["Key"]])}
+
+        s3 = BodyOnlyS3({key: self.yarn_log_with_instance_type().encode()})
+        with self.assertRaisesRegex(ValueError, "ContentLength"):
+            calculate_emr_application_usage(
+                self.request(), emr_client=FakeEmrClient(), s3_client=s3
+            )
+
     def test_missing_archived_logs_is_retryable(self):
         result = calculate_emr_application_usage(
             self.request(),
@@ -114,6 +200,82 @@ class YarnJobCostApiTest(unittest.TestCase):
         self.assertTrue(result.retryable)
         self.assertIsNone(result.vcore_seconds)
         self.assertIn("No archived", result.warnings[0])
+
+    def test_shipped_resourcemanager_logs_are_preferred(self):
+        s3 = FakeS3Client(
+            {
+                "yarn-rm-logs/j-TEST/ip-10-0-0-1/"
+                "hadoop-yarn-resourcemanager-20260928-120000-a.log": self.yarn_log_with_instance_type().encode(),
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": b"not a yarn log",
+            }
+        )
+        request = replace(self.request(), yarn_log_uri="s3://test-bucket/yarn-rm-logs/j-TEST/")
+
+        with mock.patch.object(FakeEmrClient, "describe_cluster") as describe_cluster:
+            result = calculate_emr_application_usage(
+                request, emr_client=FakeEmrClient(), s3_client=s3
+            )
+
+        describe_cluster.assert_not_called()
+        self.assertTrue(result.complete)
+        self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+
+    def test_empty_shipped_log_prefix_falls_back_to_cluster_log_uri(self):
+        s3 = FakeS3Client(
+            {
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": self.yarn_log_with_instance_type().encode()
+            }
+        )
+        request = replace(self.request(), yarn_log_uri="s3://test-bucket/yarn-rm-logs/j-TEST/")
+
+        result = calculate_emr_application_usage(
+            request, emr_client=FakeEmrClient(), s3_client=s3
+        )
+
+        self.assertTrue(result.complete)
+        self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+
+    def test_shipped_log_prefix_without_slash_excludes_sibling_clusters(self):
+        s3 = FakeS3Client(
+            {
+                "yarn-rm-logs/j-TEST2/ip-10-0-0-1/"
+                "hadoop-yarn-resourcemanager-20260928-120000-a.log": b"other cluster",
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": self.yarn_log_with_instance_type().encode(),
+            }
+        )
+        request = replace(self.request(), yarn_log_uri="s3://test-bucket/yarn-rm-logs/j-TEST")
+
+        result = calculate_emr_application_usage(
+            request, emr_client=FakeEmrClient(), s3_client=s3
+        )
+
+        self.assertTrue(result.complete)
+        self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+
+    def test_empty_shipped_log_object_falls_back_to_cluster_log_uri(self):
+        s3 = FakeS3Client(
+            {
+                "yarn-rm-logs/j-TEST/ip-10-0-0-1/"
+                "hadoop-yarn-resourcemanager-20260928-120000-a.log": b"",
+                "emr-logs/j-TEST/node/i-1/applications/"
+                "hadoop-yarn-resourcemanager-rm.log": self.yarn_log_with_instance_type().encode(),
+            }
+        )
+        request = replace(self.request(), yarn_log_uri="s3://test-bucket/yarn-rm-logs/j-TEST/")
+
+        result = calculate_emr_application_usage(
+            request, emr_client=FakeEmrClient(), s3_client=s3
+        )
+
+        self.assertTrue(result.complete)
+        self.assertEqual({"m5.xlarge": 2.0}, result.instance_seconds_by_type)
+
+    def test_request_rejects_non_s3_yarn_log_uri(self):
+        with self.assertRaisesRegex(ValueError, "Expected an S3 URI"):
+            replace(self.request(), yarn_log_uri="/var/log/hadoop-yarn")
 
     def test_missing_calculator_evidence_is_retryable(self):
         log = "\n".join(

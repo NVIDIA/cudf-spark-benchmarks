@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Callable, TextIO
 
 
 TIMESTAMP = r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})"
@@ -76,6 +76,7 @@ class Node:
     vcores: int | None = None
     gpus: int = 0
     resources: dict[str, int] = field(default_factory=dict)
+    registered_with_rm: bool = False
 
     @property
     def node_class(self) -> str:
@@ -251,7 +252,9 @@ def _container_from_match(
     )
 
 
-def parse_yarn_logs(path: Path) -> YarnEvidence:
+def parse_yarn_logs(
+    path: Path, *, check_timeout: Callable[[], None] = lambda: None
+) -> YarnEvidence:
     """Parse RM/NM daemon logs without relying on a cloud-provider layout."""
     evidence = YarnEvidence()
     rm_finishes: dict[str, int] = {}
@@ -265,6 +268,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
         path_node = evidence.nodes.setdefault(path_node_id, Node(path_node_id))
         with open_log(file) as handle:
             for raw_line in handle:
+                check_timeout()
                 line = normalize_log_line(raw_line)
                 summary = APPLICATION_SUMMARY_RE.search(line)
                 if summary:
@@ -313,6 +317,7 @@ def parse_yarn_logs(path: Path) -> YarnEvidence:
                         vcores=resources["vcores"],
                         gpus=resources.get("yarn.io/gpu", 0),
                         resources=resources,
+                        registered_with_rm=True,
                     )
                     continue
                 node_match = NODE_RE.search(line)
