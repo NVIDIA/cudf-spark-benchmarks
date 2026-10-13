@@ -103,12 +103,15 @@ def _create_data_source_table(spark_session, table_name, table_path, input_forma
     spark_session.catalog.dropTempView(table_name)
     spark_session.sql(create_sql)
     if partitions is not None:
-        for value, path in partitions:
-            add_sql = "ALTER TABLE {} ADD IF NOT EXISTS PARTITION ({}={}) LOCATION {}".format(
-                table_identifier, _quote_identifier(partition_column),
-                _quote_sql_string(value), _quote_sql_string(path))
-            print(add_sql)
-            spark_session.sql(add_sql)
+        clauses = [
+            "PARTITION ({}={}) LOCATION {}".format(
+                _quote_identifier(partition_column), _quote_sql_string(value),
+                _quote_sql_string(path))
+            for value, path in partitions
+        ]
+        if clauses:
+            spark_session.sql("ALTER TABLE {} ADD IF NOT EXISTS {}".format(
+                table_identifier, " ".join(clauses)))
     elif any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
         spark_session.catalog.recoverPartitions(table_name)
 

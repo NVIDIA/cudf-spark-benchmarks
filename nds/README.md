@@ -339,6 +339,10 @@ external Hive, Spark Connect or the legacy `--analyze_tables` flag.
 Without `--cutoff_date`, loading is unchanged.
 
 
+`--analyze none|table|column` records a separate statistics time. When
+`--json_summary_folder` is supplied, the analysis cost is also written to
+`statistics/analyze-cost.json`; analysis does not require a summary folder.
+
 Arguments supported by `nds_power.py`:
 
 ```text

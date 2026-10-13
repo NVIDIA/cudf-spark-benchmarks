@@ -201,6 +201,10 @@ With `--analyze_tables`, discovered file partitions are registered before
 collecting statistics, including NULL partitions. Partitioned and unpartitioned
 file-backed tables expose their input rows through the catalog.
 
+`--analyze none|table|column` records a separate statistics time. When
+`--json_summary_folder` is supplied, the analysis cost is also written to
+`statistics/analyze-cost.json`; analysis does not require a summary folder.
+
 Arguments supported by `nds_h_power.py`:
 
 ```text

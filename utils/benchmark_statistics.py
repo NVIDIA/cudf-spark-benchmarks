@@ -25,8 +25,6 @@ from pyspark.sql import SparkSession
 def isolated_session(builder, app_name, mode, summary_folder, input_format):
     if mode not in ('none', 'table', 'column'):
         raise ValueError('analyze must be none, table, or column')
-    if not summary_folder:
-        raise ValueError('--analyze requires --json_summary_folder')
     if input_format not in ('parquet', 'orc', 'avro', 'csv', 'json'):
         raise ValueError('--analyze requires file-backed benchmark inputs')
     if SparkSession.getActiveSession() is not None:
@@ -63,8 +61,9 @@ def analyze_catalog(session, mode, table_names, summary_folder):
         'duration_ms': (time.perf_counter_ns() - start) / 1e6 if mode != 'none' else 0,
         'tables': timings,
     }
-    cost_folder = os.path.join(summary_folder, 'statistics')
-    os.makedirs(cost_folder, exist_ok=True)
-    with open(os.path.join(cost_folder, 'analyze-cost.json'), 'w') as output:
-        json.dump(report, output, indent=2)
+    if summary_folder:
+        cost_folder = os.path.join(summary_folder, 'statistics')
+        os.makedirs(cost_folder, exist_ok=True)
+        with open(os.path.join(cost_folder, 'analyze-cost.json'), 'w') as output:
+            json.dump(report, output, indent=2)
     return report
