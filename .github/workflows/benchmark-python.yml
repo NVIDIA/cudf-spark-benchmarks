@@ -39,6 +39,6 @@ jobs:
       - name: NDS CPU Spark unit tests
         run: python -m unittest discover -s nds/tests -p 'test*.py'
       - name: NDS-H CPU Spark unit tests
-        run: python -m unittest discover -s nds-h -p 'test*.py'
+        run: python -m unittest discover -s nds-h/tests -p 'test*.py'
       - name: Shared utility unit tests
         run: python -m unittest discover -s utils -p 'test*.py'
