@@ -57,6 +57,8 @@ class ManifestHelpersTest(unittest.TestCase):
             with self.subTest(manifest=manifest), tempfile.TemporaryDirectory() as directory:
                 session = Mock()
                 session.conf.get.return_value = 'app'
+                builder = Mock()
+                builder.appName.return_value.getOrCreate.return_value = session
                 loaded = {}
                 def setup(*args):
                     loaded['tables'], loaded['dates'] = list(args[8]), args[9]
@@ -64,7 +66,7 @@ class ManifestHelpersTest(unittest.TestCase):
                 def analyze(spark, mode, tables, folder):
                     loaded['analyzed'] = list(tables)
                     return {'duration_ms': 0}
-                with patch.object(driver, 'isolated_session', return_value=session), \
+                with patch.object(driver.SparkSession, 'builder', builder), \
                         patch.object(driver, '_manifest_tables', return_value=manifest), \
                         patch.object(driver, 'setup_tables', side_effect=setup), \
                         patch.object(driver, 'analyze_catalog', side_effect=analyze), \
@@ -72,7 +74,7 @@ class ManifestHelpersTest(unittest.TestCase):
                         contextlib.redirect_stdout(io.StringIO()):
                     driver.run_query_stream(
                         '/data', None, {}, str(Path(directory) / 'times.csv'),
-                        None, None, None, 0, 1, None, analyze='column')
+                        None, None, None, 0, 1, None, analyze='all_columns')
                 expected = list(driver.get_schemas(False)) if manifest is None else manifest[0]
                 self.assertEqual(loaded['tables'], expected)
                 self.assertEqual(loaded['analyzed'], expected)

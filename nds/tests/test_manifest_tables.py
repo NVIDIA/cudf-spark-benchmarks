@@ -80,9 +80,9 @@ class ManifestTableTest(unittest.TestCase):
             names, columns = nds_power._manifest_tables(self.spark, str(self.root), 'parquet')
             nds_power.setup_tables(
                 self.spark, str(self.root), 'parquet', False, [],
-                cutoff_date=datetime.date(1998, 1, 2), analyze='column',
+                cutoff_date=datetime.date(1998, 1, 2), analyze='all_columns',
                 table_names=names, date_partition_columns=columns)
-            report = nds_power.analyze_catalog(self.spark, 'column', names, None)
+            report = nds_power.analyze_catalog(self.spark, 'all_columns', names, None)
             self.assertEqual({entry['table'] for entry in report['tables']}, set(self.tables))
             self.assertEqual({table.name for table in self.spark.catalog.listTables()}, set(self.tables))
             for name in ('orders', 'events'):

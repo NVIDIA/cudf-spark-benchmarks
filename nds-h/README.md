@@ -210,9 +210,25 @@ With `--analyze_tables`, discovered file partitions are registered before
 collecting statistics, including NULL partitions. Partitioned and unpartitioned
 file-backed tables expose their input rows through the catalog.
 
-`--analyze none|table|column` records a separate statistics time. When
-`--json_summary_folder` is supplied, the analysis cost is also written to
-`statistics/analyze-cost.json`; analysis does not require a summary folder.
+`--analyze none|table|all_columns` controls statistics collection before the
+queries. `none` is equivalent to omitting the option. `table` collects row counts
+and table size; `all_columns` also runs `COMPUTE STATISTICS FOR ALL COLUMNS`.
+The configured Spark session, catalog and input provider are retained.
+Statistics are stored in that catalog and may persist across runs. Active
+analysis requires file-backed inputs and is not supported with Delta, Iceberg,
+Spark Connect or external Hive tables; unsupported combinations return an error.
+"
+Analysis time is recorded separately in a `Statistics Time` CSV row, before
+`Power Start Time`. Query times and `Power Test Time` exclude analysis;
+`Total Time` includes it. With `--json_summary_folder`, the total and per-table
+analysis costs are also written to `statistics/analyze-cost.json`. A summary
+folder is optional.
+
+`--analyze_tables` is deprecated and prints a warning recommending
+`--analyze table`. It retains its existing behavior and timing rows, including
+being ignored for Delta and Iceberg inputs. The two options cannot appear
+together, even with `--analyze none`. Repeated `--analyze` options use the last
+value supplied.
 
 Arguments supported by `nds_h_power.py`:
 

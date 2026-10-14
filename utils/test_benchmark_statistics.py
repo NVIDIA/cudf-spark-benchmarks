@@ -1,5 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Test statistics helpers and actual drivers without starting Spark."""
 
@@ -10,6 +9,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -31,7 +31,7 @@ def load_driver(folder, script):
 
 class BenchmarkStatisticsTest(unittest.TestCase):
     def test_mode_costs_and_optional_json(self):
-        for mode in ('none', 'table', 'column'):
+        for mode in ('table', 'all_columns'):
             for save_json in (False, True):
                 with self.subTest(mode=mode, save_json=save_json), tempfile.TemporaryDirectory() as directory:
                     session = SimpleNamespace(sql=Mock())
@@ -39,45 +39,89 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                                       side_effect=[0, 1000000, 5000000, 6000000]):
                         report = statistics.analyze_catalog(
                             session, mode, ['facts'], directory if save_json else None)
-                    expected = {'mode': mode, 'duration_ms': 0 if mode == 'none' else 6,
-                                'tables': [] if mode == 'none' else
-                                [{'table': 'facts', 'duration_ms': 4}]}
+                    expected = {'mode': mode, 'duration_ms': 6,
+                                'tables': [{'table': 'facts', 'duration_ms': 4}]}
                     self.assertEqual(report, expected)
                     cost = Path(directory) / 'statistics/analyze-cost.json'
                     self.assertEqual(cost.exists(), save_json)
                     if save_json:
                         self.assertEqual(json.loads(cost.read_text()), expected)
 
-    def test_isolation_allows_no_summary_and_preserves_catalog_guards(self):
-        for override in ({}, {'spark.sql.warehouse.dir': 'old'},
-                         {'spark.sql.defaultCatalog': 'custom'}):
-            with self.subTest(override=override):
-                settings = {}
-                catalog = SimpleNamespace(database=None)
-                catalog.setCurrentDatabase = lambda value: setattr(catalog, 'database', value)
-                session = SimpleNamespace(
-                    conf=SimpleNamespace(get=lambda key, default=None:
-                                         override.get(key, settings.get(key, default))),
-                    sql=Mock(), catalog=catalog)
-                builder = Mock()
-                builder.config.side_effect = lambda key, value: settings.update({key: value}) or builder
-                builder.appName.return_value = builder
-                builder.getOrCreate.return_value = session
-                with patch.object(statistics.SparkSession, 'getActiveSession', return_value=None):
-                    if override:
-                        with self.assertRaises(ValueError):
-                            statistics.isolated_session(builder, 'test', 'column', None, 'parquet')
-                    else:
-                        self.assertIs(statistics.isolated_session(
-                            builder, 'test', 'column', None, 'parquet'), session)
-                        self.assertEqual(settings['spark.sql.catalogImplementation'], 'in-memory')
-                        self.assertTrue(catalog.database.startswith('benchmark_'))
-        with patch.object(statistics.SparkSession, 'getActiveSession', return_value=object()):
-            with self.assertRaisesRegex(ValueError, 'fresh Spark driver'):
-                statistics.isolated_session(Mock(), 'test', 'column', None, 'parquet')
-        for mode, fmt in (('invalid', 'parquet'), ('column', 'iceberg')):
-            with self.subTest(mode=mode, input_format=fmt), self.assertRaises(ValueError):
-                statistics.isolated_session(Mock(), 'test', mode, None, fmt)
+    def test_disabled_helper_has_no_statistics_output_or_json(self):
+        for mode in (None, 'none'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                session = SimpleNamespace(sql=Mock(side_effect=AssertionError('Analysis was disabled')))
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    report = statistics.analyze_catalog(session, mode, ['facts'], directory)
+                self.assertEqual(report['duration_ms'], 0)
+                self.assertEqual(report['tables'], [])
+                self.assertEqual(output.getvalue(), '')
+                self.assertFalse((Path(directory) / 'statistics').exists())
+
+    def test_cli_analysis_flags_are_mutually_exclusive_in_both_orders(self):
+        for folder, script in (('nds', 'nds_power.py'), ('nds-h', 'nds_h_power.py')):
+            for mode in ('none', 'table', 'all_columns'):
+                for flags in (['--analyze_tables', '--analyze', mode],
+                              ['--analyze', mode, '--analyze_tables']):
+                    with self.subTest(driver=folder, flags=flags):
+                        result = subprocess.run(
+                            [sys.executable, str(ROOT / folder / script), '/facts', 'stream.sql',
+                             'times.csv', *flags], capture_output=True, text=True, timeout=15)
+                        self.assertEqual(result.returncode, 2)
+                        self.assertIn('not allowed with argument', result.stderr)
+
+    def test_disabled_modes_and_legacy_warning_preserve_input_provider_behavior(self):
+        for folder, script in (('nds', 'nds_power.py'), ('nds-h', 'nds_h_power.py')):
+            driver = load_driver(folder, script)
+            cases = [('parquet', {}), ('delta', {}), ('iceberg', {}),
+                     ('parquet', {'spark_connect': 'sc://server'})]
+            if folder == 'nds':
+                cases.append(('parquet', {'hive_external': True}))
+            for input_format, extra in cases:
+                configurations = []
+                for mode, legacy in ((None, False), ('none', False), (None, True)):
+                    with self.subTest(driver=folder, mode=mode, legacy=legacy, input_format=input_format,
+                                      extra=extra), tempfile.TemporaryDirectory() as directory:
+                        settings = {'spark.sql.defaultCatalog': 'custom',
+                                    'spark.sql.warehouse.dir': '/caller/warehouse'}
+                        session = Mock()
+                        session.conf.get.return_value = 'app'
+                        builder = Mock()
+                        builder.config.side_effect = lambda key, value: settings.update({key: value}) or builder
+                        builder.remote.return_value = builder
+                        builder.enableHiveSupport.return_value = builder
+                        builder.appName.return_value.getOrCreate.return_value = session
+                        options = dict(input_prefix='/data', property_file=None, query_dict={},
+                                       time_log_output_path=str(Path(directory) / 'time.csv'),
+                                       sub_queries=None, warmup_iterations=0, iterations=1,
+                                       plan_types=None, input_format=input_format, analyze=mode,
+                                       allow_failure=True, analyze_tables=legacy, **extra)
+                        if folder == 'nds':
+                            options.update(extra_time_log_output_path=None, sub_query_patterns=None)
+                        with patch.object(driver.SparkSession, 'builder', builder), \
+                                patch.object(driver, 'setup_tables',
+                                             side_effect=lambda *args: args[4 if folder == 'nds' else 3]), \
+                                patch.object(driver, 'register_delta_tables',
+                                             side_effect=lambda *args: args[2]), \
+                                patch.object(driver, 'analyze_catalog',
+                                             side_effect=AssertionError('Analysis was disabled')), \
+                                patch.object(driver, 'Profiler', return_value=lambda **args: contextlib.nullcontext()), \
+                                patch.object(driver, 'clearQueryName'), \
+                                contextlib.redirect_stdout(io.StringIO()), \
+                                contextlib.redirect_stderr(io.StringIO()) as warning:
+                            driver.run_query_stream(**options)
+                        if legacy:
+                            self.assertIn('deprecated', warning.getvalue())
+                            self.assertIn('--analyze table', warning.getvalue())
+                        else:
+                            self.assertEqual(warning.getvalue(), '')
+                        configurations.append(settings)
+                        with Path(options['time_log_output_path']).open() as stream:
+                            names = [row['query'] for row in csv.DictReader(stream)]
+                        self.assertNotIn('Statistics Time', names)
+                        self.assertFalse((Path(directory) / 'statistics').exists())
+                self.assertEqual(configurations[0], configurations[1])
+                self.assertEqual(configurations[0], configurations[2])
 
     def test_selected_catalog_registration_keeps_root_recovery_disabled(self):
         driver = load_driver('nds', 'nds_power.py')
@@ -111,18 +155,21 @@ class BenchmarkStatisticsTest(unittest.TestCase):
             options = dict(input_prefix='/data', property_file=None, query_dict={},
                            time_log_output_path='time.csv', sub_queries=None,
                            warmup_iterations=0, iterations=1, plan_types=None, input_format='parquet')
-            cases = [{'analyze_tables': True}, {'spark_connect': 'sc://server'}]
+            cases = [{'analyze_tables': True}, {'spark_connect': 'sc://server'},
+                     {'input_format': 'delta'}, {'input_format': 'iceberg'}]
             if folder == 'nds':
                 options.update(extra_time_log_output_path=None, sub_query_patterns=None)
                 cases.append({'hive_external': True})
+            with self.assertRaisesRegex(ValueError, '--analyze'):
+                driver.run_query_stream(**options, analyze='none', analyze_tables=True)
             for extra in cases:
                 with self.subTest(driver=folder, options=extra), self.assertRaisesRegex(ValueError, '--analyze'):
-                    driver.run_query_stream(**options, analyze='column', **extra)
+                    driver.run_query_stream(**dict(options, analyze='all_columns', **extra))
 
     def test_actual_driver_statistics_cost_precedes_query_window_without_summary(self):
         for folder, script in (('nds', 'nds_power.py'), ('nds-h', 'nds_h_power.py')):
             driver = load_driver(folder, script)
-            for mode in (None, 'column'):
+            for mode in (None, 'none', 'all_columns'):
                 with self.subTest(driver=folder, mode=mode), tempfile.TemporaryDirectory() as directory:
                     session = Mock()
                     session.conf.get.return_value = 'app'
@@ -137,7 +184,6 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                     if folder == 'nds':
                         options.update(extra_time_log_output_path=None, sub_query_patterns=None)
                     with patch.object(driver.SparkSession, 'builder', builder), \
-                            patch.object(driver, 'isolated_session', return_value=session), \
                             patch.object(driver, 'setup_tables',
                                          side_effect=lambda *args: args[4 if folder == 'nds' else 3]), \
                             patch.object(driver, 'analyze_catalog', return_value={'duration_ms': 1000}), \
@@ -156,7 +202,7 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                     values = {row['query']: float(row['time/milliseconds']) for row in rows}
                     self.assertEqual(values['Power Test Time'], 10000)
                     self.assertEqual(values['Total Time'], 50000)
-                    if mode is None:
+                    if mode in (None, 'none'):
                         self.assertNotIn('Statistics Time', values)
                     else:
                         self.assertEqual(values['Statistics Time'], 1000)
