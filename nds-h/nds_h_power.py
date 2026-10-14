@@ -289,7 +289,8 @@ def run_query_stream(input_prefix,
                      profiling_hook=None,
                      app_name=None,
                      spark_connect=None,
-                     analyze_tables=False):
+                     analyze_tables=False,
+                     allow_failure=False):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. TempView Creation time is also recorded.
 
@@ -306,6 +307,7 @@ def run_query_stream(input_prefix,
         :param keep_sc : Databricks specific to keep the spark context alive. Defaults to False.
         :param json_summary_folder : path to save JSON summary files for each query.
         :param analyze_tables : whether to compute table statistics after creating tables.
+        :param allow_failure : exit successfully even if a query or task failed.
     """
     queries_reports = []
     execution_time_list = []
@@ -410,7 +412,8 @@ def run_query_stream(input_prefix,
     if exit_code:
         print("Above queries failed or completed with failed tasks. Please check the logs for the detailed reason.")
 
-    sys.exit(exit_code)
+    if not allow_failure:
+        sys.exit(exit_code)
 
 
 def load_properties(filename):
@@ -489,6 +492,9 @@ if __name__ == "__main__":
                         help='Skip the execution of the queries. This can be used in conjunction with ' +
                         '--save_plan_path to only save the execution plans without running the queries.' +
                         'Note that "spark.sql.adaptive.enabled" should be set to false to get GPU physical plans.')
+    parser.add_argument('--allow_failure',
+                        action='store_true',
+                        help='Do not exit with non zero when any query failed or any task failed')
     parser.add_argument('--profiling_hook',
                         help='Executable that is called just before/after a query executes.' +
                         'The executable is called like this ' +
@@ -516,4 +522,5 @@ if __name__ == "__main__":
                      args.profiling_hook,
                      args.app_name,
                      args.spark_connect,
-                     args.analyze_tables)
+                     args.analyze_tables,
+                     args.allow_failure)

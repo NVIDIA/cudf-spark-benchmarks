@@ -197,6 +197,15 @@ The listener implementation is binary compatible with both Scala 2.12 and Scala 
 
 _After_ user generates query streams, Power Run can be executed using one of them by submitting `nds_h_power.py` to Spark.
 
+Add `--allow_failure` to an `nds_h_power.py` run to exit successfully even when a
+query fails or completes with failed tasks. Without the flag, these failures
+still produce exit code 1. The time-log CSV and per-query JSON summaries are
+written as usual; failed queries remain visible in `queryStatus` and their time
+is still counted in `Power Test Time`.
+
+Setup and infrastructure errors still fail the run; the flag only changes
+the final exit status for reported query/task failures.
+
 With `--analyze_tables`, discovered file partitions are registered before
 collecting statistics, including NULL partitions. Partitioned and unpartitioned
 file-backed tables expose their input rows through the catalog.
@@ -208,6 +217,7 @@ usage: nds_h_power.py [-h] [--input_format {parquet,}]
                            [--output_format OUTPUT_FORMAT] 
                            [--property_file PROPERTY_FILE]
                            [--app_name APP_NAME]
+                           [--allow_failure]
                            <input_data_location> 
                            <query_stream_file>
                            <time_log_file>
@@ -234,6 +244,7 @@ optional arguments:
   --sub_queries SUB_QUERIES
                         comma separated list of queries to run. If not specified, all queries in the stream file will be run. 
                         e.g. "query1,query2,query3". Note, use "_part1","_part2" and "part_3" suffix for the following query names: query15
+  --allow_failure       exit successfully when a query fails or completes with failed tasks.
   --app_name APP_NAME   The name of the Spark application. If not specified, the default is "NDS-H - Power Run".
                         Useful for identifying runs in cluster UIs and logs.
 ```
