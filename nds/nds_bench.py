@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,7 +34,7 @@
 #
 # 1. run nds_transcode.py to load data to Iceberg or DeltaLake. => get "TLoad" and "timestamp" for 2.
 # 2. run nds_gen_query_stream.py to generate query streams with RNDSEED = "timestamp" from 1.
-#    TPC-DS specification requires Sq >= 4, but this script allow Sq >= 1 for test purpose.
+#    TPC-DS requires Sq to be an even integer greater than or equal to 4.
 # 3. run nds_power.py to do Power Test => get "TPower"
 # 4. run nds-throughput to do Throughput Test 1. => get "Ttt1"
 # 5. run nds_maintenance.py to do Maintenance Test 1.  => get "Tdm1"
@@ -123,16 +123,45 @@ def get_start_end_time(report_file):
             f"Start or End time not found in Power Test report file: {report_file}")
 
 
+def get_num_streams_in_throughput(num_streams):
+    """Derive and validate Sq, the number of streams in each throughput test."""
+    if not isinstance(num_streams, int) or isinstance(num_streams, bool):
+        raise ValueError("num_streams must be an integer")
+
+    num_streams_in_throughput = (num_streams - 1) // 2
+    if (num_streams != 2 * num_streams_in_throughput + 1 or
+            num_streams_in_throughput < 4 or
+            num_streams_in_throughput % 2 != 0):
+        raise ValueError(
+            "num_streams must equal 2 * Sq + 1, where Sq is an even "
+            "integer greater than or equal to 4")
+    return num_streams_in_throughput
+
+
 def get_stream_range(num_streams, first_or_second):
     """get the range of stream numbers for the given number of total streams and the index of throughput test
     e.g. num_streams = 9, first_or_second = 1 => return [1,2,3,4]
     e.g. num_streams = 9, first_or_second = 2 => return [5,6,7,8]
     """
+    num_streams_in_throughput = get_num_streams_in_throughput(num_streams)
     if first_or_second == 1:
-        stream_range = [x for x in range(1, num_streams//2+1)]
-    else:
-        stream_range = [x for x in range(num_streams//2+1, num_streams)]
-    return stream_range
+        return list(range(1, num_streams_in_throughput + 1))
+    if first_or_second == 2:
+        return list(range(num_streams_in_throughput + 1,
+                          2 * num_streams_in_throughput + 1))
+    raise ValueError("first_or_second must be 1 or 2")
+
+
+def get_refresh_range(num_streams, first_or_second):
+    """Get the refresh-run numbers for one of the two maintenance tests."""
+    num_streams_in_throughput = get_num_streams_in_throughput(num_streams)
+    refresh_runs_per_test = num_streams_in_throughput // 2
+    if first_or_second == 1:
+        return list(range(1, refresh_runs_per_test + 1))
+    if first_or_second == 2:
+        return list(range(refresh_runs_per_test + 1,
+                          num_streams_in_throughput + 1))
+    raise ValueError("first_or_second must be 1 or 2")
 
 
 def get_throughput_time(throughput_report_file_base, num_streams, first_or_second):
@@ -186,9 +215,9 @@ def get_maintenance_time(maintenance_report_base_path,
     Returns:
         float: elapse time of maintenance test.
     """
-    refresh_nums = get_stream_range(num_streams, first_or_second)
+    refresh_nums = get_refresh_range(num_streams, first_or_second)
     Tdm = 0
-    # refresh run for each stream in Throughput Test 1.
+    # Sum the Sq / 2 refresh runs assigned to this maintenance test.
     for i in refresh_nums:
         maintenance_report_path = maintenance_report_base_path + \
             f"_{i}" + ".csv"
@@ -209,6 +238,7 @@ def round_up_to_nearest_10_percent(num):
 
 
 def run_data_gen(scale_factor, parallel, data_path, local_or_hdfs, num_streams):
+    num_streams_in_throughput = get_num_streams_in_throughput(num_streams)
     gen_data_cmd = ["python3",
                     "nds_gen_data.py",
                     local_or_hdfs,
@@ -217,7 +247,7 @@ def run_data_gen(scale_factor, parallel, data_path, local_or_hdfs, num_streams):
                     data_path,
                     "--overwrite_output"]
     subprocess.run(gen_data_cmd, check=True)
-    for i in range(1, num_streams):
+    for i in range(1, num_streams_in_throughput + 1):
         gen_refresh_data_cmd = ["python3",
                                 "nds_gen_data.py",
                                 local_or_hdfs,
@@ -313,8 +343,8 @@ def maintenance_test(num_streams,
                      maintenance_report_base_path,
                      property_path,
                      warehouse_type):
-    refresh_nums = get_stream_range(num_streams, first_or_second)
-    # refresh run for each stream in Throughput Test.
+    refresh_nums = get_refresh_range(num_streams, first_or_second)
+    # Run the Sq / 2 refresh sets assigned to this maintenance test.
     for i in refresh_nums:
         maintenance_raw_path = maintenance_raw_data_base_path + f"_{i}"
         maintenance_report_path = maintenance_report_base_path + \
@@ -378,6 +408,7 @@ def run_full_bench(yaml_params):
     load_report_path = yaml_params['load_test']['report_path']
     skip_stream_gen = yaml_params['generate_query_stream']['skip']
     num_streams = yaml_params['generate_query_stream']['num_streams']
+    num_streams_in_throughput = get_num_streams_in_throughput(num_streams)
     query_template_dir = yaml_params['generate_query_stream']['query_template_dir']
     stream_output_path = yaml_params['generate_query_stream']['stream_output_path']
     power_stream_path = stream_output_path + "/query_0.sql"
@@ -484,7 +515,8 @@ def run_full_bench(yaml_params):
                                 num_streams,
                                 2)
     perf_metric = get_perf_metric(
-        scale_factor, num_streams//2, Tld, TPower, Ttt1, Ttt2, Tdm1, Tdm2)
+        scale_factor, num_streams_in_throughput,
+        Tld, TPower, Ttt1, Ttt2, Tdm1, Tdm2)
     print(f"====== Performance Metric: {perf_metric} ======")
     metrics_map = {"scale_factor": scale_factor,
                    "num_streams": num_streams,
