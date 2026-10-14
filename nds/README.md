@@ -352,7 +352,7 @@ Spark Connect or external Hive tables; unsupported combinations return an error.
 With `--cutoff_date`, analysis covers only the selected fact partitions,
 including NULL partitions; dimensions remain complete. Cutoff catalog loading
 requires fresh table names in the current database.
-"
+
 Analysis time is recorded separately in a `Statistics Time` CSV row, before
 `Power Start Time`. Query times and `Power Test Time` exclude analysis;
 `Total Time` includes it. With `--json_summary_folder`, the total and per-table
