@@ -18,6 +18,23 @@ import os
 import time
 
 
+def require_fresh_catalog_tables(session, table_names):
+    database = session.catalog.currentDatabase().replace('`', '``')
+    for table in table_names:
+        qualified = '`' + database + '`.`' + table.replace('`', '``') + '`'
+        if session.catalog.tableExists(qualified):
+            raise ValueError('--analyze requires fresh catalog tables; already exists: ' + qualified)
+
+
+def clear_statistics_summary(summary_folder):
+    if summary_folder:
+        path = os.path.join(summary_folder, 'statistics', 'analyze-cost.json')
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
 def analyze_table(session, mode, table_name):
     if mode not in ('table', 'all_columns'):
         raise ValueError('active analysis must be table or all_columns')

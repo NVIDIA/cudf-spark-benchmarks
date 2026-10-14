@@ -214,7 +214,9 @@ file-backed tables expose their input rows through the catalog.
 queries. `none` is equivalent to omitting the option. `table` collects row counts
 and table size; `all_columns` also runs `COMPUTE STATISTICS FOR ALL COLUMNS`.
 The configured Spark session, catalog and input provider are retained.
-Statistics are stored in that catalog and may persist across runs. Active
+Statistics are stored in that catalog and may persist across runs. New active
+analysis requires fresh target table names; an existing table is rejected before
+loading so another dataset cannot be reused accidentally. Active
 analysis requires file-backed inputs and is not supported with Delta, Iceberg,
 Spark Connect or external Hive tables; unsupported combinations return an error.
 
@@ -222,7 +224,8 @@ Analysis time is recorded separately in a `Statistics Time` CSV row, before
 `Power Start Time`. Query times and `Power Test Time` exclude analysis;
 `Total Time` includes it. With `--json_summary_folder`, the total and per-table
 analysis costs are also written to `statistics/analyze-cost.json`. A summary
-folder is optional.
+folder is optional. Preparing a reused NDS summary folder removes the previous
+analysis-cost file, including when analysis is disabled.
 
 `--analyze_tables` is deprecated and prints a warning recommending
 `--analyze table`. It retains its existing behavior and timing rows, including
