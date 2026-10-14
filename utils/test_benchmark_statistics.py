@@ -30,6 +30,28 @@ def load_driver(folder, script):
 
 
 class BenchmarkStatisticsTest(unittest.TestCase):
+    def test_statistics_cleanup_removes_only_its_reserved_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / 'statistics'
+            folder.mkdir()
+            cost = folder / 'analyze-cost.json'
+            cost.write_text('old analysis')
+            other = folder / 'notes.txt'
+            other.write_text('keep me')
+            statistics.clear_statistics_summary(directory)
+            statistics.clear_statistics_summary(directory)
+            statistics.clear_statistics_summary(None)
+            self.assertFalse(cost.exists())
+            self.assertEqual(other.read_text(), 'keep me')
+
+    def test_fresh_catalog_guard_rejects_existing_targets_without_running_sql(self):
+        session = SimpleNamespace(
+            catalog=SimpleNamespace(currentDatabase=lambda: 'caller',
+                                    tableExists=lambda name: name.endswith('.`facts`')),
+            sql=Mock(side_effect=AssertionError('Preflight must not create tables')))
+        with self.assertRaisesRegex(ValueError, 'fresh catalog tables'):
+            statistics.require_fresh_catalog_tables(session, ['fresh', 'facts'])
+
     def test_mode_costs_and_optional_json(self):
         for mode in ('table', 'all_columns'):
             for save_json in (False, True):
@@ -167,6 +189,26 @@ class BenchmarkStatisticsTest(unittest.TestCase):
             for extra in cases:
                 with self.subTest(driver=folder, options=extra), self.assertRaisesRegex(ValueError, '--analyze'):
                     driver.run_query_stream(**dict(options, analyze='all_columns', **extra))
+
+    def test_ndsh_nonempty_summary_folder_still_rejects_before_artifact_cleanup(self):
+        driver = load_driver('nds-h', 'nds_h_power.py')
+        spec = importlib.util.spec_from_file_location('shared_summary_check', ROOT / 'utils/check.py')
+        check = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(check)
+        with tempfile.TemporaryDirectory() as directory:
+            cost = Path(directory) / 'statistics/analyze-cost.json'
+            cost.parent.mkdir()
+            cost.write_text('old analysis')
+            builder = Mock()
+            builder.appName.return_value.getOrCreate.return_value.conf.get.return_value = 'app'
+            with patch.object(driver.SparkSession, 'builder', builder), \
+                    patch.object(driver, 'setup_tables', side_effect=lambda *args: args[3]), \
+                    patch.object(driver, 'check_json_summary_folder', check.check_json_summary_folder):
+                with self.assertRaisesRegex(Exception, 'not empty'):
+                    driver.run_query_stream('/facts', None, {}, str(Path(directory) / 'time.csv'),
+                                            None, 0, 1, None, 'parquet', json_summary_folder=directory,
+                                            analyze='none', allow_failure=True)
+            self.assertEqual(cost.read_text(), 'old analysis')
 
     def test_actual_driver_statistics_cost_precedes_query_window_without_summary(self):
         for folder, script in (('nds', 'nds_power.py'), ('nds-h', 'nds_h_power.py')):

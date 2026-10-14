@@ -44,7 +44,8 @@ from setup_utils import add_utils_to_sys_path
 add_utils_to_sys_path()
 from spark_utils import setQueryName, clearQueryName
 from profiler import Profiler
-from benchmark_statistics import analyze_table, analyze_catalog
+from benchmark_statistics import (analyze_table, analyze_catalog, clear_statistics_summary,
+                                  require_fresh_catalog_tables)
 
 from python_benchmark_reporter.PysparkBenchReport import PysparkBenchReport
 from pyspark.sql import DataFrame
@@ -137,6 +138,8 @@ def setup_tables(spark_session, input_prefix, input_format, execution_time_list,
         execution_time_list: a list recording que15ry execution time.
     """
     statistics_requested = analyze_tables or analyze in ('table', 'all_columns')
+    if analyze in ('table', 'all_columns'):
+        require_fresh_catalog_tables(spark_session, get_schemas())
     spark_app_id = _get_app_id(spark_session)
     # Create TempViews or data source tables
     for table_name in get_schemas().keys():
@@ -351,10 +354,11 @@ def run_query_stream(input_prefix,
                                                      execution_time_list)
 
     check_json_summary_folder(json_summary_folder)
+    clear_statistics_summary(json_summary_folder)
     if analyze is not None:
         statistics = analyze_catalog(spark_session, analyze, get_schemas().keys(),
                                      json_summary_folder)
-        execution_time_list.append((spark_app_id, "Statistics Time", statistics['duration_ms']))
+        execution_time_list.append((spark_app_id, "Statistics Time", int(statistics['duration_ms'])))
     if sub_queries:
         query_dict = get_query_subset(query_dict, sub_queries)
 
