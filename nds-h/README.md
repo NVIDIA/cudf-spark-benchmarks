@@ -217,7 +217,7 @@ The configured Spark session, catalog and input provider are retained.
 Statistics are stored in that catalog and may persist across runs. Active
 analysis requires file-backed inputs and is not supported with Delta, Iceberg,
 Spark Connect or external Hive tables; unsupported combinations return an error.
-"
+
 Analysis time is recorded separately in a `Statistics Time` CSV row, before
 `Power Start Time`. Query times and `Power Test Time` exclude analysis;
 `Total Time` includes it. With `--json_summary_folder`, the total and per-table
