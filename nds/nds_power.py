@@ -49,7 +49,7 @@ from setup_utils import add_utils_to_sys_path
 add_utils_to_sys_path()
 from spark_utils import setQueryName, clearQueryName
 from profiler import Profiler
-from benchmark_statistics import isolated_session, analyze_catalog
+from benchmark_statistics import analyze_table, analyze_catalog
 
 check_version()
 
@@ -346,16 +346,17 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
         execution_time_list ([(str, str, int)]): a list to record query and its execution time.
         analyze_tables (bool): whether to register catalog tables and compute table statistics.
         cutoff_date (date): include dated fact partitions through this date, plus NULL.
-        analyze (str): optional none, table, or column mode in an isolated catalog.
+        analyze (str): optional none, table, or all_columns statistics mode.
 
     Returns:
         execution_time_list: a list recording query execution time.
     """
+    statistics_requested = analyze_tables or analyze in ('table', 'all_columns')
     spark_app_id = _get_app_id(spark_session)
     partitions = {}
     if cutoff_date is not None:
         start = int(time.time() * 1000)
-        if analyze_tables:
+        if statistics_requested:
             for table_name in get_schemas(False):
                 _require_fresh_catalog_table(spark_session, table_name)
         if isinstance(cutoff_date, str):
@@ -380,27 +381,25 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
             selected = partitions[table_name]
             selected_frame = reader.option('basePath', table_path).load(
                 [path for _, path in selected])
-            if analyze_tables or analyze in ('table', 'column'):
+            if statistics_requested:
                 _create_data_source_table(
                     spark_session, table_name, table_path, input_format, selected_frame.schema,
                     selected, DATE_PARTITION_COLUMNS[table_name])
             else:
                 selected_frame.createOrReplaceTempView(table_name)
-        elif analyze_tables or analyze in ('table', 'column'):
+        elif statistics_requested:
             _create_data_source_table(spark_session, table_name, table_path, input_format, schema)
         else:
             reader.load(table_path).createOrReplaceTempView(table_name)
         end = int(time.time() * 1000)
-        create_action = "Table" if analyze_tables or analyze in ('table', 'column') else "TempView"
+        create_action = "Table" if statistics_requested else "TempView"
         print("====== Creating {} for table {} ======".format(create_action, table_name))
         print("Time taken: {} millis for table {}".format(end - start, table_name))
         execution_time_list.append(
             (spark_app_id, "Create{} {}".format(create_action, table_name), end - start))
         if analyze_tables:
             start = int(time.time() * 1000)
-            analyze_sql = "ANALYZE TABLE `{}` COMPUTE STATISTICS".format(table_name)
-            print(analyze_sql)
-            spark_session.sql(analyze_sql)
+            analyze_table(spark_session, 'table', table_name)
             end = int(time.time() * 1000)
             print("====== Analyzing table {} ======".format(table_name))
             print("Time taken: {} millis for table {}".format(end - start, table_name))
@@ -566,11 +565,22 @@ def run_query_stream(input_prefix,
         to "parquet".
         analyze_tables (bool, optional): whether to compute table statistics after creating tables.
     """
+    if analyze_tables and analyze is not None:
+        raise ValueError('--analyze and --analyze_tables cannot be combined')
+    if analyze == 'none':
+        analyze = None
     if analyze is not None:
-        if analyze_tables or spark_connect:
-            raise ValueError('--analyze cannot be combined with legacy analysis or Spark Connect')
+        if analyze not in ('table', 'all_columns'):
+            raise ValueError('analyze must be none, table, or all_columns')
+        if spark_connect:
+            raise ValueError('--analyze is not supported with Spark Connect')
+        if input_format in ('iceberg', 'delta'):
+            raise ValueError('--analyze is not supported for Iceberg or Delta inputs')
         if hive_external:
-            raise ValueError('--analyze cannot use an external Hive catalog')
+            raise ValueError('--analyze is not supported with external Hive tables')
+    if analyze_tables:
+        print('Warning: --analyze_tables is deprecated; use --analyze table for supported '
+              'file-backed inputs. Legacy behavior is unchanged.', file=sys.stderr)
     if cutoff_date is not None and (input_format in ('iceberg', 'delta') or
                                     hive_external or spark_connect):
         raise ValueError('--cutoff_date requires file-backed inputs '
@@ -602,10 +612,7 @@ def run_query_stream(input_prefix,
     if hive_external:
         session_builder.enableHiveSupport()
 
-    spark_session = (isolated_session(session_builder, app_name, analyze,
-                                      json_summary_folder, input_format)
-                     if analyze is not None else
-                     session_builder.appName(app_name).getOrCreate())
+    spark_session = session_builder.appName(app_name).getOrCreate()
     if hive_external:
         spark_session.catalog.setCurrentDatabase(input_prefix)
 
@@ -777,11 +784,12 @@ if __name__ == "__main__":
                         help='Restrict dated fact partitions through this ISO date, plus NULL. '
                              'Does not shift SQL dates; callers must supply queries whose dates fit '
                              'the loaded data.')
-    parser.add_argument('--analyze', choices=['none', 'table', 'column'],
-                        help='Analyze inputs in a fresh catalog and record separate statistics cost.')
-    parser.add_argument('--analyze_tables',
-                        action='store_true',
-                        help='Run ANALYZE TABLE <table> COMPUTE STATISTICS after creating each table.')
+    analysis = parser.add_mutually_exclusive_group()
+    analysis.add_argument('--analyze', choices=['none', 'table', 'all_columns'],
+                          help='Compute input statistics and record their cost; none leaves loading unchanged.')
+    analysis.add_argument('--analyze_tables',
+                          action='store_true',
+                          help='Deprecated: use --analyze table for supported file-backed inputs.')
     parser.add_argument('--output_prefix',
                         help='text to prepend to every output file (e.g., "hdfs:///ds-parquet")')
     parser.add_argument('--output_format',

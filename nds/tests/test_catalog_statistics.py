@@ -1,5 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Spark-submit tests of selected catalog inputs and recomputed column statistics."""
 
@@ -16,7 +15,7 @@ from pyspark.sql import SparkSession
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'nds'))
 import nds_power
-from benchmark_statistics import isolated_session, analyze_catalog
+from benchmark_statistics import analyze_catalog
 
 
 sys.path.insert(0, str(ROOT / 'nds-h'))
@@ -58,16 +57,22 @@ class CatalogStatisticsTest(unittest.TestCase):
         return (SparkSession.builder.master('local[2]')
                 .config('spark.ui.enabled', 'false')
                 .config('spark.sql.shuffle.partitions', '1')
+                .config('spark.sql.catalogImplementation', 'in-memory')
+                .config('spark.sql.warehouse.dir', str(cls.root / 'warehouse'))
                 .config('spark.sql.hive.manageFilesourcePartitions', 'true'))
 
     @classmethod
     def tearDownClass(cls):
         cls.directory.cleanup()
 
-    def start_session(self, mode):
-        session = isolated_session(self.builder(), 'catalog-statistics-tests', mode,
-                                   str(self.root / 'summary'), 'parquet')
+    def start_session(self):
+        session = self.builder().appName('catalog-statistics-tests').getOrCreate()
         session.sparkContext.setLogLevel('ERROR')
+        session.sql('CREATE DATABASE IF NOT EXISTS caller_catalog')
+        session.catalog.setCurrentDatabase('caller_catalog')
+        for table in list(nds_power.get_schemas(False)) + list(nds_h_power.get_schemas()):
+            session.catalog.dropTempView(table)
+            session.sql('DROP TABLE IF EXISTS `' + table + '`')
         return session
 
     def assert_row_statistics(self, session, table, count):
@@ -80,15 +85,20 @@ class CatalogStatisticsTest(unittest.TestCase):
         databases = []
         for day, count in ((2, 3), (3, 4)):
             with self.subTest(day=day):
-                session = self.start_session('column')
+                session = self.start_session()
                 try:
                     databases.append(session.catalog.currentDatabase())
+                    warehouse = session.conf.get('spark.sql.warehouse.dir')
                     nds_power.setup_tables(session, str(self.root / 'nds'), 'parquet', False, [],
-                                           cutoff_date=datetime.date(2001, 1, day), analyze='column')
+                                           cutoff_date=datetime.date(2001, 1, day), analyze='all_columns')
                     report_folder = self.root / ('summary-' + str(day))
-                    report = analyze_catalog(session, 'column', nds_power.get_schemas(False),
+                    report = analyze_catalog(session, 'all_columns', nds_power.get_schemas(False),
                                              str(report_folder))
-                    self.assertEqual(report['mode'], 'column')
+                    self.assertEqual(report['mode'], 'all_columns')
+                    self.assertEqual(session.catalog.currentDatabase(), 'caller_catalog')
+                    self.assertEqual(session.conf.get('spark.sql.catalogImplementation'), 'in-memory')
+                    self.assertEqual(session.conf.get('spark.sql.warehouse.dir'),
+                                     warehouse)
                     self.assertEqual(len(report['tables']), 24)
                     self.assertGreater(report['duration_ms'], 0)
                     self.assertEqual(json.loads(
@@ -110,31 +120,33 @@ class CatalogStatisticsTest(unittest.TestCase):
                     self.assert_row_statistics(session, 'customer', 2)
                 finally:
                     session.stop()
-        self.assertNotEqual(databases[0], databases[1])
+        self.assertEqual(databases, ['caller_catalog', 'caller_catalog'])
 
     def test_full_inputs_none_and_table_modes_and_ndsh_column_statistics(self):
-        for mode in ('none', 'table'):
+        for mode in (None, 'none', 'table'):
             with self.subTest(mode=mode):
-                session = self.start_session(mode)
+                session = self.start_session()
                 try:
                     nds_power.setup_tables(session, str(self.root / 'nds'), 'parquet', False, [],
                                            analyze=mode)
                     report = analyze_catalog(session, mode, nds_power.get_schemas(False),
-                                             str(self.root / ('full-' + mode)))
+                                             str(self.root / ('full-' + str(mode))))
                     self.assertEqual(session.table('store_sales').count(), 4)
                     self.assertEqual(session.catalog.getTable('store_sales').isTemporary,
-                                     mode == 'none')
-                    if mode == 'none':
+                                     mode in (None, 'none'))
+                    self.assertEqual(session.catalog.currentDatabase(), 'caller_catalog')
+                    if mode in (None, 'none'):
+                        self.assertFalse((self.root / ('full-' + str(mode)) / 'statistics').exists())
                         self.assertEqual(report['duration_ms'], 0)
                         self.assertEqual(report['tables'], [])
                     else:
                         self.assert_row_statistics(session, 'store_sales', 4)
                 finally:
                     session.stop()
-        session = self.start_session('column')
+        session = self.start_session()
         try:
-            nds_h_power.setup_tables(session, str(self.root / 'ndsh'), 'parquet', [], analyze='column')
-            analyze_catalog(session, 'column', nds_h_power.get_schemas(),
+            nds_h_power.setup_tables(session, str(self.root / 'ndsh'), 'parquet', [], analyze='all_columns')
+            analyze_catalog(session, 'all_columns', nds_h_power.get_schemas(),
                             str(self.root / 'ndsh-summary'))
             for table in nds_h_power.get_schemas():
                 self.assertEqual(session.table(table).count(), 3)
