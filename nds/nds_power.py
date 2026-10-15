@@ -666,9 +666,7 @@ def run_query_stream(input_prefix,
     check_json_summary_folder(json_summary_folder)
     clear_statistics_summary(json_summary_folder)
     if analyze is not None:
-        statistics = analyze_catalog(spark_session, analyze, table_names,
-                                     json_summary_folder)
-        execution_time_list.append((spark_app_id, "Statistics Time", int(statistics['duration_ms'])))
+        analyze_catalog(spark_session, analyze, table_names, json_summary_folder)
     if sub_queries:
         query_dict = get_query_subset(query_dict, sub_queries)
     if sub_query_patterns:

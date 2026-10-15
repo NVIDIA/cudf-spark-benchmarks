@@ -355,11 +355,10 @@ With `--cutoff_date`, analysis covers only the selected fact partitions,
 including NULL partitions; dimensions remain complete. Cutoff catalog loading
 requires fresh table names in the current database.
 
-Analysis time is recorded separately in a `Statistics Time` CSV row, before
-`Power Start Time`. Query times and `Power Test Time` exclude analysis;
-`Total Time` includes it. With `--json_summary_folder`, the total and per-table
-analysis costs are also written to `statistics/analyze-cost.json`. A summary
-folder is optional. Preparing a reused NDS summary folder removes the previous
+Query times and `Power Test Time` exclude analysis; `Total Time` includes it.
+Analysis adds no timing CSV rows. With `--json_summary_folder`, total and
+per-table analysis costs are written separately to `statistics/analyze-cost.json`.
+A summary folder is optional. Preparing a reused NDS summary folder removes the previous
 analysis-cost file, including when analysis is disabled.
 
 `--analyze_tables` is deprecated and prints a warning recommending

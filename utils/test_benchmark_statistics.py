@@ -210,10 +210,11 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                                             analyze='none', allow_failure=True)
             self.assertEqual(cost.read_text(), 'old analysis')
 
-    def test_actual_driver_statistics_cost_precedes_query_window_without_summary(self):
+    def test_analysis_preserves_timing_csv_rows_and_excludes_cost_from_power_time(self):
         for folder, script in (('nds', 'nds_power.py'), ('nds-h', 'nds_h_power.py')):
             driver = load_driver(folder, script)
-            for mode in (None, 'none', 'all_columns'):
+            expected_rows = None
+            for mode in (None, 'none', 'table', 'all_columns'):
                 with self.subTest(driver=folder, mode=mode), tempfile.TemporaryDirectory() as directory:
                     session = Mock()
                     session.conf.get.return_value = 'app'
@@ -246,12 +247,10 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                     values = {row['query']: float(row['time/milliseconds']) for row in rows}
                     self.assertEqual(values['Power Test Time'], 10000)
                     self.assertEqual(values['Total Time'], 50000)
-                    if mode in (None, 'none'):
-                        self.assertNotIn('Statistics Time', values)
-                    else:
-                        self.assertEqual(values['Statistics Time'], 1000)
-                        names = [row['query'] for row in rows]
-                        self.assertLess(names.index('Statistics Time'), names.index('Power Start Time'))
+                    self.assertNotIn('Statistics Time', values)
+                    if expected_rows is None:
+                        expected_rows = rows
+                    self.assertEqual(rows, expected_rows)
 
 
 if __name__ == '__main__':
