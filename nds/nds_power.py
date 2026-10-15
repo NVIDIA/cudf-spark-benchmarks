@@ -601,7 +601,7 @@ def run_query_stream(input_prefix,
     if hive_external:
         spark_session.catalog.setCurrentDatabase(input_prefix)
 
-    if input_format == 'delta' and delta_unmanaged:
+    if input_format == 'delta' and delta_unmanaged and not no_table_setup:
         # Register tables for Delta Lake. This is only needed for unmanaged tables.
         execution_time_list = register_delta_tables(spark_session, input_prefix, execution_time_list)
     spark_app_id = _get_app_id(spark_session)
