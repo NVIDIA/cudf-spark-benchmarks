@@ -547,7 +547,8 @@ def run_query_stream(input_prefix,
                      skip_execution=False,
                      app_name=None,
                      spark_connect=None,
-                     analyze_tables=False, cutoff_date=None):
+                     analyze_tables=False, cutoff_date=None,
+                     no_table_setup=False):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. TempView Creation time is also recorded.
 
@@ -600,11 +601,12 @@ def run_query_stream(input_prefix,
     if hive_external:
         spark_session.catalog.setCurrentDatabase(input_prefix)
 
-    if input_format == 'delta' and delta_unmanaged:
+    if input_format == 'delta' and delta_unmanaged and not no_table_setup:
         # Register tables for Delta Lake. This is only needed for unmanaged tables.
         execution_time_list = register_delta_tables(spark_session, input_prefix, execution_time_list)
     spark_app_id = _get_app_id(spark_session)
-    if input_format != 'iceberg' and input_format != 'delta' and not hive_external:
+    if (input_format != 'iceberg' and input_format != 'delta' and not hive_external
+            and not no_table_setup):
         execution_time_list = setup_tables(spark_session, input_prefix, input_format, use_decimal,
                                            execution_time_list,
                                            analyze_tables, cutoff_date)
@@ -802,6 +804,11 @@ if __name__ == "__main__":
     parser.add_argument('--allow_failure',
                         action='store_true',
                         help='Do not exit with non zero when any query failed or any task failed')
+    parser.add_argument('--no_table_setup',
+                        action='store_true',
+                        help='skip registering the NDS tables; for query streams that name their '
+                             'own sources, such as a path read. input_prefix is then unused and no '
+                             'NDS table is visible to the queries.')
     parser.add_argument('--profiling_hook',
                         help='Executable that is called just before/after a query executes.' +
                         'The executable is called like this ' +
@@ -873,4 +880,5 @@ if __name__ == "__main__":
                      args.app_name,
                      args.spark_connect,
                      args.analyze_tables,
-                     args.cutoff_date)
+                     args.cutoff_date,
+                     args.no_table_setup)
