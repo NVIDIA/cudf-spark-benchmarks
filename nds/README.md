@@ -367,11 +367,10 @@ being ignored for Delta and Iceberg inputs. The two options cannot appear
 together, even with `--analyze none`. Repeated `--analyze` options use the last
 value supplied.
 
-To run a custom SQL stream against your own Parquet tables, provide a
-[`_benchmark_manifest.json` dataset manifest](docs/dataset-manifest.md) at the
-input root. It selects the tables to load and optionally identifies date-partition
-columns for `--cutoff_date`. Without a manifest, the normal TPC-DS table selection
-is unchanged.
+To run a custom SQL stream against your own Parquet tables, pass
+[`--dataset_manifest PATH`](docs/dataset-manifest.md). The manifest selects tables
+to load and optionally identifies date-partition columns for `--cutoff_date`.
+Without this option, the normal TPC-DS table selection is unchanged.
 
 Arguments supported by `nds_power.py`:
 

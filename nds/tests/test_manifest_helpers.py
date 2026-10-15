@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Test manifest parsing and actual driver plumbing without starting Spark."""
+"""Test explicit manifest parsing and driver selection without starting Spark."""
 
 import contextlib
 import io
@@ -27,25 +27,39 @@ class ManifestHelpersTest(unittest.TestCase):
         session._jvm.java.util.Scanner.return_value = scanner
         return session, scanner
 
-    def test_missing_marker_and_manifest_table_selection(self):
-        tables = {'date_dim': {'date_partition_column': None},
-                  'orders': {'date_partition_column': 'order_day'},
-                  'customers': {'date_partition_column': None}}
+    def test_hadoop_uri_selects_the_explicit_manifest_and_closes_its_reader(self):
+        tables = {'date_dim': {}, 'orders': {'date_partition_column': 'order_day'},
+                  'customers': {}}
         session, scanner = self.session(json.dumps({'tables': tables}))
-        self.assertEqual(driver._manifest_tables(session, '/data', 'parquet'),
+        path = session._jvm.org.apache.hadoop.fs.Path.return_value
+        selected = []
+        def hadoop_path(uri):
+            selected.append(uri)
+            return path
+        session._jvm.org.apache.hadoop.fs.Path.side_effect = hadoop_path
+        uri = 's3a://datasets/metadata/custom.json'
+        self.assertEqual(driver._manifest_tables(session, uri),
                          (['date_dim', 'orders', 'customers'], {'orders': 'order_day'}))
+        self.assertEqual(selected, [uri])
         self.assertTrue(scanner.closed)
+
+    def test_local_manifest_needs_no_date_metadata_or_hadoop_filesystem(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'custom.json'
+            manifest.write_text(json.dumps({'tables': {'orders': {}, 'customers': {}}}))
+            self.assertEqual(driver._manifest_tables(None, str(manifest)),
+                             (['orders', 'customers'], {}))
+            manifest.unlink()
+            with self.assertRaises(FileNotFoundError):
+                driver._manifest_tables(None, str(manifest))
+
+    def test_missing_hadoop_manifest_is_an_error(self):
         session, scanner = self.session('', exists=False)
-        self.assertIsNone(driver._manifest_tables(session, '/data', 'csv'))
+        with self.assertRaisesRegex(ValueError, 'Dataset manifest does not exist'):
+            driver._manifest_tables(session, 'hdfs:///metadata/missing.json')
         self.assertFalse(scanner.closed)
 
-    def test_no_cutoff_accepts_tables_without_date_metadata_or_date_dim(self):
-        session, scanner = self.session(json.dumps({'tables': {'orders': {}, 'customers': {}}}))
-        self.assertEqual(driver._manifest_tables(session, '/data', 'parquet'),
-                         (['orders', 'customers'], {}))
-        self.assertTrue(scanner.closed)
-
-    def test_errors_preserve_scanner_cleanup(self):
+    def test_invalid_manifest_reports_metadata_errors(self):
         for content, message in (('{', 'Expecting'),
                                  ('{"tables": {}}', 'nonempty tables object'),
                                  ('{"tables": []}', 'nonempty tables object'),
@@ -57,41 +71,56 @@ class ManifestHelpersTest(unittest.TestCase):
             with self.subTest(content=content):
                 session, scanner = self.session(content)
                 with self.assertRaisesRegex(ValueError, message):
-                    driver._manifest_tables(session, '/data', 'parquet')
+                    driver._manifest_tables(session, 'hdfs:///custom.json')
                 self.assertTrue(scanner.closed)
-        session, scanner = self.session('{}')
-        with self.assertRaisesRegex(ValueError, 'requires Parquet'):
-            driver._manifest_tables(session, '/data', 'orc')
-        self.assertFalse(scanner.closed)
 
-    def test_driver_uses_same_tables_for_loading_and_statistics(self):
-        for manifest in (None, (['date_dim', 'orders'], {'orders': 'order_day'})):
-            with self.subTest(manifest=manifest), tempfile.TemporaryDirectory() as directory:
-                session = Mock()
-                session.conf.get.return_value = 'app'
-                builder = Mock()
-                builder.appName.return_value.getOrCreate.return_value = session
-                loaded = {}
-                def setup(*args):
-                    loaded['tables'], loaded['dates'] = list(args[8]), args[9]
-                    return args[4]
-                def analyze(spark, mode, tables, folder):
-                    loaded['analyzed'] = list(tables)
-                    return {'duration_ms': 0}
-                with patch.object(driver.SparkSession, 'builder', builder), \
-                        patch.object(driver, '_manifest_tables', return_value=manifest), \
-                        patch.object(driver, 'setup_tables', side_effect=setup), \
-                        patch.object(driver, 'analyze_catalog', side_effect=analyze), \
-                        patch.object(driver, 'Profiler'), patch.object(driver, 'clearQueryName'), \
-                        contextlib.redirect_stdout(io.StringIO()):
-                    driver.run_query_stream(
-                        '/data', None, {}, str(Path(directory) / 'times.csv'),
-                        None, None, None, 0, 1, None, analyze='all_columns')
-                expected = list(driver.get_schemas(False)) if manifest is None else manifest[0]
-                self.assertEqual(loaded['tables'], expected)
-                self.assertEqual(loaded['analyzed'], expected)
-                self.assertEqual(loaded['dates'], driver.DATE_PARTITION_COLUMNS
-                                 if manifest is None else manifest[1])
+    def test_explicit_manifest_requires_classic_file_backed_parquet(self):
+        for options in ({'input_format': 'orc'}, {'input_format': 'delta'},
+                        {'input_format': 'iceberg'}, {'hive_external': True},
+                        {'spark_connect': 'sc://localhost'}):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(ValueError, '--dataset_manifest requires'):
+                    driver.run_query_stream('/data', None, {}, '/tmp/times.csv',
+                                            None, None, None, 0, 1, None,
+                                            dataset_manifest='/custom.json', **options)
+
+    def test_omission_ignores_colocated_manifest_and_preserves_nds_tables(self):
+        self.assert_driver_table_selection(explicit=False)
+
+    def test_explicit_manifest_uses_same_tables_for_loading_and_statistics(self):
+        self.assert_driver_table_selection(explicit=True)
+
+    def assert_driver_table_selection(self, explicit):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '_benchmark_manifest.json').write_text('{invalid colocated metadata')
+            manifest = root / 'chosen.json'
+            tables = {'orders': {'date_partition_column': 'order_day'}, 'customers': {}}
+            manifest.write_text(json.dumps({'tables': tables}))
+            session = Mock()
+            session.conf.get.return_value = 'app'
+            builder = Mock()
+            builder.appName.return_value.getOrCreate.return_value = session
+            loaded = {}
+            def setup(*args):
+                loaded['tables'], loaded['dates'] = list(args[8]), args[9]
+                return args[4]
+            def analyze(spark, mode, names, folder):
+                loaded['analyzed'] = list(names)
+                return {'duration_ms': 0}
+            with patch.object(driver.SparkSession, 'builder', builder), \
+                    patch.object(driver, 'setup_tables', side_effect=setup), \
+                    patch.object(driver, 'analyze_catalog', side_effect=analyze), \
+                    patch.object(driver, 'Profiler'), patch.object(driver, 'clearQueryName'), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                driver.run_query_stream(
+                    str(root), None, {}, str(root / 'times.csv'), None, None, None, 0, 1, None,
+                    analyze='all_columns', dataset_manifest=str(manifest) if explicit else None)
+            expected = list(tables) if explicit else list(driver.get_schemas(False))
+            self.assertEqual(loaded['tables'], expected)
+            self.assertEqual(loaded['analyzed'], expected)
+            self.assertEqual(loaded['dates'], {'orders': 'order_day'} if explicit
+                             else driver.DATE_PARTITION_COLUMNS)
 
 
 if __name__ == '__main__':

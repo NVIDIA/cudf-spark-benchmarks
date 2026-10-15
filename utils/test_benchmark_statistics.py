@@ -120,9 +120,7 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                                        allow_failure=True, analyze_tables=legacy, **extra)
                         if folder == 'nds':
                             options.update(extra_time_log_output_path=None, sub_query_patterns=None)
-                        with (patch.object(driver, '_manifest_tables', return_value=None)
-                              if folder == 'nds' else contextlib.nullcontext()), \
-                                patch.object(driver.SparkSession, 'builder', builder), \
+                        with patch.object(driver.SparkSession, 'builder', builder), \
                                 patch.object(driver, 'setup_tables',
                                              side_effect=lambda *args: args[4 if folder == 'nds' else 3]), \
                                 patch.object(driver, 'register_delta_tables',
@@ -218,8 +216,6 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                 with self.subTest(driver=folder, mode=mode), tempfile.TemporaryDirectory() as directory:
                     session = Mock()
                     session.conf.get.return_value = 'app'
-                    filesystem = session._jvm.org.apache.hadoop.fs.Path.return_value.getFileSystem.return_value
-                    filesystem.exists.return_value = False
                     builder = Mock()
                     builder.appName.return_value.getOrCreate.return_value = session
                     options = dict(input_prefix='/data', property_file=None, query_dict={},

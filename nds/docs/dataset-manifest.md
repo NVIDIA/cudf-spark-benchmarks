@@ -6,14 +6,15 @@ statistics collection without requiring TPC-DS table names or schemas.
 
 ## Dataset layout
 
-Put `_benchmark_manifest.json` at the input root, with one subdirectory per
-listed table:
+Keep one subdirectory per listed table under the input root. Select a separate
+JSON manifest with `--dataset_manifest PATH`; its name and location are arbitrary:
 
 ```text
 dataset/
-  _benchmark_manifest.json
   purchases/
   accounts/
+metadata/
+  workload.json
 ```
 
 For example:
@@ -32,9 +33,17 @@ The `tables` object must be nonempty. Each table entry is an object; omitting
 that table. Only listed tables are registered. Spark infers column schemas and
 existing partitions from the Parquet files.
 
+An unqualified path such as `/path/to/workload.json` or `metadata/workload.json`
+is a driver-local file, regardless of Spark's default filesystem. A URI such as
+`file:///path/to/workload.json`, `hdfs:///metadata/workload.json` or
+`s3a://bucket/metadata/workload.json` uses the corresponding Hadoop filesystem;
+its connector and credentials must be available to the driver. Missing or invalid
+manifests are errors.
+
 Manifest loading requires file-backed Parquet inputs and a classic Spark
 session. It does not apply to Spark Connect, external Hive tables, Iceberg or
-Delta inputs. Without a manifest, the ordinary NDS loading behavior is unchanged.
+Delta inputs. Without `--dataset_manifest`, the ordinary NDS loading behavior is
+unchanged. The driver does not discover metadata files in the input directory.
 
 ## Run a query stream
 
@@ -42,6 +51,8 @@ Supply the dataset root and your SQL stream using the driver's existing argument
 
 ```bash
 spark-submit nds/nds_power.py \
+  --dataset_manifest /path/to/metadata/workload.json \
+  --app_name 'Custom workload' \
   --output_prefix /path/to/results \
   /path/to/dataset /path/to/queries.sql /path/to/times.csv
 ```
@@ -100,6 +111,8 @@ Run that dataset through a cutoff and save statistics costs with:
 
 ```bash
 spark-submit nds/nds_power.py \
+  --dataset_manifest /path/to/metadata/workload.json \
+  --app_name 'Custom workload with cutoff' \
   --cutoff_date 2001-07-01 \
   --analyze all_columns \
   --json_summary_folder /path/to/summaries \

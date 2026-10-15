@@ -66,7 +66,8 @@ class ManifestTableTest(unittest.TestCase):
                            'ON o.payload = e.payload'},
                 str(self.root / 'times.csv'), None, None, None, 0, 1, None,
                 output_path=str(self.root / 'output'), keep_sc=True,
-                json_summary_folder=str(self.root / 'summaries'), cutoff_date='1998-01-02')
+                json_summary_folder=str(self.root / 'summaries'), cutoff_date='1998-01-02',
+                dataset_manifest=str(self.manifest))
         self.assertEqual({table.name for table in self.spark.catalog.listTables()}, set(self.tables))
         for name, column in (('orders', 'order_day'), ('events', 'event_day')):
             self.assertEqual({row[0] for row in self.spark.table(name).select(column).collect()},
@@ -82,7 +83,7 @@ class ManifestTableTest(unittest.TestCase):
         self.spark.sql('CREATE DATABASE manifest_statistics')
         self.spark.catalog.setCurrentDatabase('manifest_statistics')
         try:
-            names, columns = nds_power._manifest_tables(self.spark, str(self.root), 'parquet')
+            names, columns = nds_power._manifest_tables(self.spark, str(self.manifest))
             nds_power.setup_tables(
                 self.spark, str(self.root), 'parquet', False, [],
                 cutoff_date=datetime.date(1998, 1, 2), analyze='all_columns',
@@ -104,7 +105,7 @@ class ManifestTableTest(unittest.TestCase):
         self.spark.sql('CREATE DATABASE manifest_legacy_statistics')
         self.spark.catalog.setCurrentDatabase('manifest_legacy_statistics')
         try:
-            names, columns = nds_power._manifest_tables(self.spark, str(self.root), 'parquet')
+            names, columns = nds_power._manifest_tables(self.spark, str(self.manifest))
             nds_power.setup_tables(
                 self.spark, str(self.root), 'parquet', False, [],
                 analyze_tables=True, cutoff_date=datetime.date(1998, 1, 2),
@@ -122,16 +123,14 @@ class ManifestTableTest(unittest.TestCase):
             self.spark.catalog.setCurrentDatabase('default')
             self.spark.sql('DROP DATABASE manifest_legacy_statistics CASCADE')
 
-    def test_manifest_absence_leaves_default_selection_available(self):
-        self.assertIsNone(nds_power._manifest_tables(
-            self.spark, str(self.root / 'absent'), 'parquet'))
+    def test_explicit_file_uri_reads_the_same_manifest_as_a_local_path(self):
+        self.assertEqual(nds_power._manifest_tables(self.spark, self.manifest.as_uri()),
+                         nds_power._manifest_tables(self.spark, str(self.manifest)))
 
-    def test_manifest_requires_parquet_and_integer_cutoffs_require_date_dim(self):
-        with self.assertRaisesRegex(ValueError, 'requires Parquet'):
-            nds_power._manifest_tables(self.spark, str(self.root), 'orc')
+    def test_integer_cutoffs_require_date_dim_in_the_manifest(self):
         self.manifest.write_text(json.dumps({'tables': {'orders': self.tables['orders']}}))
         try:
-            self.assertEqual(nds_power._manifest_tables(self.spark, str(self.root), 'parquet'),
+            self.assertEqual(nds_power._manifest_tables(self.spark, str(self.manifest)),
                              (['orders'], {'orders': 'order_day'}))
             with self.assertRaisesRegex(ValueError, 'Integer date partitions require date_dim'):
                 nds_power.setup_tables(
@@ -197,7 +196,9 @@ class GenericDatasetTest(unittest.TestCase):
                                        'JOIN accounts a ON p.account_id = a.account_id'},
                             str(run / 'times.csv'), None, None, None, 0, 1, None,
                             output_path=str(run / 'output'), keep_sc=True, analyze=mode,
-                            json_summary_folder=str(run / 'summaries'))
+                            json_summary_folder=str(run / 'summaries'),
+                            dataset_manifest=(self.root / '_benchmark_manifest.json').as_uri()
+                            if mode == 'table' else str(self.root / '_benchmark_manifest.json'))
                     tables = {table.name: table.isTemporary
                               for table in self.spark.catalog.listTables()}
                     self.assertEqual(tables, {'purchases': mode is None, 'accounts': mode is None})
@@ -235,7 +236,8 @@ class GenericDatasetTest(unittest.TestCase):
                                        'JOIN accounts a ON p.account_id = a.account_id'},
                             str(run / 'times.csv'), None, None, None, 0, 1, None,
                             output_path=str(run / 'output'), keep_sc=True, analyze=mode,
-                            cutoff_date='2001-07-02', json_summary_folder=str(run / 'summaries'))
+                            cutoff_date='2001-07-02', json_summary_folder=str(run / 'summaries'),
+                            dataset_manifest=str(self.dated / '_benchmark_manifest.json'))
                     tables = {table.name: table.isTemporary
                               for table in self.spark.catalog.listTables()}
                     self.assertEqual(tables, {'purchases': mode is None, 'accounts': mode is None})

@@ -39,6 +39,7 @@ import re
 import sys
 import time
 from collections import OrderedDict
+from urllib.parse import urlparse
 from pyspark.sql import SparkSession
 from PysparkBenchReport import PysparkBenchReport
 from pyspark.sql import DataFrame
@@ -133,20 +134,22 @@ DATE_PARTITION_COLUMNS = {
 }
 
 
-def _manifest_tables(spark_session, input_prefix, input_format):
-    path = spark_session._jvm.org.apache.hadoop.fs.Path(
-        input_prefix + '/_benchmark_manifest.json')
-    filesystem = path.getFileSystem(spark_session.sparkContext._jsc.hadoopConfiguration())
-    if not filesystem.exists(path):
-        return None
-    if input_format != 'parquet':
-        raise ValueError('A benchmark manifest requires Parquet input')
-    scanner = spark_session._jvm.java.util.Scanner(filesystem.open(path), 'UTF-8')
-    try:
-        scanner.useDelimiter('\\A')
-        manifest = json.loads(scanner.next() if scanner.hasNext() else '')
-    finally:
-        scanner.close()
+def _manifest_tables(spark_session, manifest_path):
+    if not urlparse(manifest_path).scheme:
+        # Unqualified paths name driver-local files, even with a non-local Hadoop default FS.
+        with open(manifest_path, encoding='utf-8') as source:
+            manifest = json.load(source)
+    else:
+        path = spark_session._jvm.org.apache.hadoop.fs.Path(manifest_path)
+        filesystem = path.getFileSystem(spark_session.sparkContext._jsc.hadoopConfiguration())
+        if not filesystem.exists(path):
+            raise ValueError('Dataset manifest does not exist: ' + manifest_path)
+        scanner = spark_session._jvm.java.util.Scanner(filesystem.open(path), 'UTF-8')
+        try:
+            scanner.useDelimiter('\\A')
+            manifest = json.loads(scanner.next() if scanner.hasNext() else '')
+        finally:
+            scanner.close()
     tables = manifest.get('tables') if isinstance(manifest, dict) else None
     if not isinstance(tables, dict) or not tables:
         raise ValueError('A benchmark manifest must contain a nonempty tables object')
@@ -605,7 +608,7 @@ def run_query_stream(input_prefix,
                      skip_execution=False,
                      app_name=None,
                      spark_connect=None,
-                     analyze_tables=False, cutoff_date=None, analyze=None):
+                     analyze_tables=False, cutoff_date=None, analyze=None, dataset_manifest=None):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. TempView Creation time is also recorded.
 
@@ -621,7 +624,11 @@ def run_query_stream(input_prefix,
         output_format (str, optional): query output format, choices are csv, orc, parquet. Defaults
         to "parquet".
         analyze_tables (bool, optional): whether to compute table statistics after creating tables.
+        dataset_manifest (str, optional): explicit driver-local JSON file or Hadoop-supported URI.
     """
+    if dataset_manifest is not None and (input_format != 'parquet' or spark_connect or hive_external):
+        raise ValueError('--dataset_manifest requires file-backed Parquet inputs '
+                         'and a classic Spark session (not Spark Connect)')
     if analyze_tables and analyze is not None:
         raise ValueError('--analyze and --analyze_tables cannot be combined')
     if analyze == 'none':
@@ -674,8 +681,8 @@ def run_query_stream(input_prefix,
         spark_session.catalog.setCurrentDatabase(input_prefix)
 
     manifest_tables = None
-    if not spark_connect and not hive_external and input_format not in ('iceberg', 'delta'):
-        manifest_tables = _manifest_tables(spark_session, input_prefix, input_format)
+    if dataset_manifest is not None:
+        manifest_tables = _manifest_tables(spark_session, dataset_manifest)
     table_names, date_partition_columns = (manifest_tables or
                                           (get_schemas(False).keys(), DATE_PARTITION_COLUMNS))
     if input_format == 'delta' and delta_unmanaged:
@@ -842,6 +849,9 @@ if __name__ == "__main__":
                         'for more details.',
                         choices=['parquet', 'orc', 'avro', 'csv', 'json', 'iceberg', 'delta'],
                         default='parquet')
+    parser.add_argument('--dataset_manifest',
+                        help='Explicit dataset manifest: a driver-local file or Hadoop-supported URI. '
+                             'Requires file-backed Parquet and classic Spark.')
     parser.add_argument('--cutoff_date', type=_parse_cutoff_date,
                         help='Restrict dated fact partitions through this ISO date, plus NULL. '
                              'Does not shift SQL dates; callers must supply queries whose dates fit '
@@ -959,4 +969,5 @@ if __name__ == "__main__":
                      args.spark_connect,
                      args.analyze_tables,
                      args.cutoff_date,
-                     args.analyze)
+                     args.analyze,
+                     args.dataset_manifest)
