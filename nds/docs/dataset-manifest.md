@@ -83,6 +83,10 @@ FROM purchases p JOIN accounts a ON p.account_id = a.account_id;
 -- end query 1 in stream 0 using template query1.tpl
 ```
 
+`query1.tpl` is a label in the stream marker, not a file you need to supply.
+Use a distinct label for each query; `query1` becomes its name in reports and
+result paths.
+
 Without `--cutoff_date`, every listed table is loaded in full and no
 `date_dim` table is required. By default tables are temporary views.
 `--analyze table|all_columns` registers catalog tables and collects statistics
