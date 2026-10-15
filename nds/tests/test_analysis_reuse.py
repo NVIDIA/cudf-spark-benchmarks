@@ -84,7 +84,7 @@ class AnalysisReuseTest(unittest.TestCase):
                     self.assertFalse(self.spark.catalog.tableExists('fresh'))
                     self.assertEqual([row.payload for row in self.spark.table('facts').collect()], [111])
 
-    def test_extra_timing_csv_uses_integer_milliseconds_and_json_retains_fraction(self):
+    def test_analysis_cost_is_saved_in_json_and_not_in_either_timing_csv(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             options = self.options(output)
@@ -99,7 +99,7 @@ class AnalysisReuseTest(unittest.TestCase):
             with (output / 'times.csv').open() as stream:
                 rows = list(csv.DictReader(stream))
             timings = {row['query']: row['time/milliseconds'] for row in rows}
-            self.assertEqual(timings['Statistics Time'], '25')
+            self.assertNotIn('Statistics Time', timings)
             for row in rows:
                 int(row['time/milliseconds'])
             exported = []

@@ -220,11 +220,10 @@ loading so another dataset cannot be reused accidentally. Active
 analysis requires file-backed inputs and is not supported with Delta, Iceberg,
 Spark Connect or external Hive tables; unsupported combinations return an error.
 
-Analysis time is recorded separately in a `Statistics Time` CSV row, before
-`Power Start Time`. Query times and `Power Test Time` exclude analysis;
-`Total Time` includes it. With `--json_summary_folder`, the total and per-table
-analysis costs are also written to `statistics/analyze-cost.json`. A summary
-folder is optional. Preparing a reused NDS summary folder removes the previous
+Query times and `Power Test Time` exclude analysis; `Total Time` includes it.
+Analysis adds no timing CSV rows. With `--json_summary_folder`, total and
+per-table analysis costs are written separately to `statistics/analyze-cost.json`.
+A summary folder is optional. Preparing a reused NDS summary folder removes the previous
 analysis-cost file, including when analysis is disabled.
 
 `--analyze_tables` is deprecated and prints a warning recommending
