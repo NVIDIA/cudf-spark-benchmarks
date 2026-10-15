@@ -1,13 +1,27 @@
-# Custom datasets
+# Benchmarking custom datasets
 
-The NDS power driver can run a custom SQL stream against Parquet tables selected
-by a dataset manifest. This reuses its query execution, result writing and
-statistics collection without requiring TPC-DS table names or schemas.
+Use the NDS power driver to benchmark your own SQL against Parquet data. Supply
+three inputs:
+
+- A dataset root containing your Parquet tables.
+- A JSON manifest identifying which tables to load.
+- A SQL stream that queries those tables.
+
+The manifest supplies the table names and optional date-partition metadata in
+place of the built-in TPC-DS definitions. Spark infers the schemas from your
+Parquet files. The driver provides query execution, result writing and statistics
+collection.
 
 ## Dataset layout
 
-Keep one subdirectory per listed table under the input root. Select a separate
-JSON manifest with `--dataset_manifest PATH`; its name and location are arbitrary:
+The `input_prefix` argument points to your dataset root. Each table listed in the
+manifest is loaded from a subdirectory with the same name and registered under
+that name for SQL queries. For example, a `purchases` entry loads
+`<input_prefix>/purchases` and makes it available as `purchases`.
+
+Pass the manifest separately with `--dataset_manifest PATH`. It describes existing
+data; it does not contain or generate it. The file can live alongside the dataset
+or elsewhere accessible to the Spark driver. For example:
 
 ```text
 dataset/
@@ -17,7 +31,7 @@ metadata/
   workload.json
 ```
 
-For example:
+For this layout, save the following as `metadata/workload.json`:
 
 ```json
 {
@@ -40,10 +54,11 @@ is a driver-local file, regardless of Spark's default filesystem. A URI such as
 its connector and credentials must be available to the driver. Missing or invalid
 manifests are errors.
 
-Manifest loading requires file-backed Parquet inputs and a classic Spark
-session. It does not apply to Spark Connect, external Hive tables, Iceberg or
-Delta inputs. Without `--dataset_manifest`, the ordinary NDS loading behavior is
-unchanged. The driver does not discover metadata files in the input directory.
+Manifest loading requires file-backed Parquet inputs and a regular Spark
+session, rather than Spark Connect. It does not apply to external Hive tables,
+Iceberg or Delta inputs. Without `--dataset_manifest`, the ordinary NDS loading
+behavior is unchanged. The driver does not discover metadata files in the input
+directory.
 
 ## Run a query stream
 
@@ -71,9 +86,10 @@ FROM purchases p JOIN accounts a ON p.account_id = a.account_id;
 Without `--cutoff_date`, every listed table is loaded in full and no
 `date_dim` table is required. By default tables are temporary views.
 `--analyze table|all_columns` registers catalog tables and collects statistics
-for the same listed tables. Analysis requires fresh catalog table names; it does
-not reuse existing tables. When `--json_summary_folder` is provided, analysis
-costs are saved separately in `statistics/analyze-cost.json`.
+for the same listed tables. Analysis fails if a listed table name already exists
+in the catalog, to avoid analyzing data from an earlier run. When
+`--json_summary_folder` is provided, analysis costs are saved separately in
+`statistics/analyze-cost.json`.
 
 ## Date cutoffs
 
