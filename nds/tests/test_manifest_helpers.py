@@ -39,9 +39,21 @@ class ManifestHelpersTest(unittest.TestCase):
         self.assertIsNone(driver._manifest_tables(session, '/data', 'csv'))
         self.assertFalse(scanner.closed)
 
+    def test_no_cutoff_accepts_tables_without_date_metadata_or_date_dim(self):
+        session, scanner = self.session(json.dumps({'tables': {'orders': {}, 'customers': {}}}))
+        self.assertEqual(driver._manifest_tables(session, '/data', 'parquet'),
+                         (['orders', 'customers'], {}))
+        self.assertTrue(scanner.closed)
+
     def test_errors_preserve_scanner_cleanup(self):
         for content, message in (('{', 'Expecting'),
-                                 ('{"tables": {}}', 'must list date_dim')):
+                                 ('{"tables": {}}', 'nonempty tables object'),
+                                 ('{"tables": []}', 'nonempty tables object'),
+                                 ('{"tables": {"orders": null}}', 'metadata must be an object'),
+                                 ('{"tables": {"orders": {"date_partition_column": ""}}}',
+                                  'nonempty string or null'),
+                                 ('{"tables": {"orders": {"date_partition_column": 7}}}',
+                                  'nonempty string or null')):
             with self.subTest(content=content):
                 session, scanner = self.session(content)
                 with self.assertRaisesRegex(ValueError, message):

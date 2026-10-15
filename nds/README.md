@@ -367,13 +367,11 @@ being ignored for Delta and Iceberg inputs. The two options cannot appear
 together, even with `--analyze none`. Repeated `--analyze` options use the last
 value supplied.
 
-A synthetic Parquet dataset can provide `_benchmark_manifest.json` at its root.
-The `tables` object lists table names and each table's `date_partition_column`
-(string or null); it must include `date_dim`. Only listed tables are loaded.
-Cutoff selection uses those date columns and `date_dim`, including NULL partitions;
-each partitioned table must also have a dated partition through the cutoff.
-With `--analyze table|column`, statistics cover the same loaded tables.
-Without a manifest, the normal TPC-DS table selection is unchanged.
+To run a custom SQL stream against your own Parquet tables, provide a
+[`_benchmark_manifest.json` dataset manifest](docs/dataset-manifest.md) at the
+input root. It selects the tables to load and optionally identifies date-partition
+columns for `--cutoff_date`. Without a manifest, the normal TPC-DS table selection
+is unchanged.
 
 Arguments supported by `nds_power.py`:
 

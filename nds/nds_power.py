@@ -147,11 +147,17 @@ def _manifest_tables(spark_session, input_prefix, input_format):
         manifest = json.loads(scanner.next() if scanner.hasNext() else '')
     finally:
         scanner.close()
-    tables = manifest['tables']
-    if 'date_dim' not in tables:
-        raise ValueError('A benchmark manifest must list date_dim')
+    tables = manifest.get('tables') if isinstance(manifest, dict) else None
+    if not isinstance(tables, dict) or not tables:
+        raise ValueError('A benchmark manifest must contain a nonempty tables object')
+    for name, table in tables.items():
+        if not isinstance(table, dict):
+            raise ValueError('Manifest table metadata must be an object: ' + name)
+        column = table.get('date_partition_column')
+        if column is not None and (not isinstance(column, str) or not column):
+            raise ValueError('date_partition_column must be a nonempty string or null: ' + name)
     date_columns = {name: table['date_partition_column'] for name, table in tables.items()
-                    if table['date_partition_column'] is not None}
+                    if table.get('date_partition_column') is not None}
     return list(tables), date_columns
 
 
@@ -178,7 +184,8 @@ def _date_key_mapping(spark_session, input_prefix, input_format, use_decimal):
     return dates
 
 
-def _partitions_at_cutoff(spark_session, table_path, partition_column, dates, cutoff_date):
+def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_keys, cutoff_date):
+    """Select date partitions, resolving integer keys through a lazily loaded date dimension."""
     path = spark_session._jvm.org.apache.hadoop.fs.Path(table_path)
     filesystem = path.getFileSystem(spark_session.sparkContext._jsc.hadoopConfiguration())
     partitions = []
@@ -195,10 +202,16 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, dates, cu
             try:
                 key = int(value)
             except ValueError:
-                raise ValueError("Invalid date partition at " + entry.getPath().toString())
-            if key not in dates:
-                raise ValueError("Partition date key missing from date_dim: " + value)
-            if dates[key] > cutoff_date:
+                try:
+                    partition_date = datetime.datetime.strptime(value, '%Y-%m-%d').date()
+                except ValueError:
+                    raise ValueError("Invalid date partition at " + entry.getPath().toString())
+            else:
+                dates = get_date_keys()
+                if key not in dates:
+                    raise ValueError("Partition date key missing from date_dim: " + value)
+                partition_date = dates[key]
+            if partition_date > cutoff_date:
                 continue
             has_dated_partition = True
         partitions.append((value, entry.getPath().toString()))
@@ -393,10 +406,22 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
                 _require_fresh_catalog_table(spark_session, table_name)
         if isinstance(cutoff_date, str):
             cutoff_date = _parse_cutoff_date(cutoff_date)
-        dates = _date_key_mapping(spark_session, input_prefix, input_format, use_decimal)
+        dates = None
+
+        def get_date_keys():
+            # Calendar-date partitions need no dimension table. Resolve integer
+            # date keys only when encountered, sharing one mapping across tables.
+            nonlocal dates
+            if dates is None:
+                if 'date_dim' not in table_names:
+                    raise ValueError('Integer date partitions require date_dim with '
+                                     'd_date_sk and d_date columns in the manifest')
+                dates = _date_key_mapping(spark_session, input_prefix, input_format, use_decimal)
+            return dates
+
         for table_name, column in date_partition_columns.items():
             partitions[table_name] = _partitions_at_cutoff(
-                spark_session, input_prefix + '/' + table_name, column, dates, cutoff_date)
+                spark_session, input_prefix + '/' + table_name, column, get_date_keys, cutoff_date)
         cutoff_setup_time = int(time.time() * 1000) - start
         print("====== Power Cutoff Setup Time: {} milliseconds ======".format(cutoff_setup_time))
         execution_time_list.append((spark_app_id, "Power Cutoff Setup Time", cutoff_setup_time))
@@ -649,7 +674,7 @@ def run_query_stream(input_prefix,
         spark_session.catalog.setCurrentDatabase(input_prefix)
 
     manifest_tables = None
-    if not spark_connect and not hive_external:
+    if not spark_connect and not hive_external and input_format not in ('iceberg', 'delta'):
         manifest_tables = _manifest_tables(spark_session, input_prefix, input_format)
     table_names, date_partition_columns = (manifest_tables or
                                           (get_schemas(False).keys(), DATE_PARTITION_COLUMNS))
