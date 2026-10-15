@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import sys
+import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
@@ -39,7 +40,7 @@ class ManifestHelpersTest(unittest.TestCase):
         session._jvm.org.apache.hadoop.fs.Path.side_effect = hadoop_path
         uri = 's3a://datasets/metadata/custom.json'
         self.assertEqual(driver._manifest_tables(session, uri),
-                         (['date_dim', 'orders', 'customers'], {'orders': 'order_day'}))
+                         tables)
         self.assertEqual(selected, [uri])
         self.assertTrue(scanner.closed)
 
@@ -48,7 +49,7 @@ class ManifestHelpersTest(unittest.TestCase):
             manifest = Path(directory) / 'custom.json'
             manifest.write_text(json.dumps({'tables': {'orders': {}, 'customers': {}}}))
             self.assertEqual(driver._manifest_tables(None, str(manifest)),
-                             (['orders', 'customers'], {}))
+                             {'orders': {}, 'customers': {}})
             manifest.unlink()
             with self.assertRaises(FileNotFoundError):
                 driver._manifest_tables(None, str(manifest))
@@ -75,14 +76,39 @@ class ManifestHelpersTest(unittest.TestCase):
                 self.assertTrue(scanner.closed)
 
     def test_explicit_manifest_requires_classic_file_backed_parquet(self):
-        for options in ({'input_format': 'orc'}, {'input_format': 'delta'},
-                        {'input_format': 'iceberg'}, {'hive_external': True},
-                        {'spark_connect': 'sc://localhost'}):
+        for options in ({'hive_external': True}, {'spark_connect': 'sc://localhost'}):
             with self.subTest(options=options):
                 with self.assertRaisesRegex(ValueError, '--dataset_manifest requires'):
                     driver.run_query_stream('/data', None, {}, '/tmp/times.csv',
                                             None, None, None, 0, 1, None,
                                             dataset_manifest='/custom.json', **options)
+
+    def test_manifest_rejects_explicit_input_format_including_parquet(self):
+        for input_format in ('parquet', 'orc', 'avro', 'csv', 'json', 'iceberg', 'delta'):
+            with self.subTest(input_format=input_format):
+                with self.assertRaisesRegex(ValueError, 'cannot be combined'):
+                    driver.run_query_stream('/data', None, {}, '/tmp/times.csv',
+                                            None, None, None, 0, 1, None,
+                                            input_format=input_format,
+                                            dataset_manifest='/custom.json')
+
+    def test_cli_rejects_both_dataset_options_in_either_order_before_reading_inputs(self):
+        for input_format in ('parquet', 'json'):
+            for manifest_first in (False, True):
+                with self.subTest(input_format=input_format, manifest_first=manifest_first):
+                    options = [['--input_format', input_format],
+                               ['--dataset_manifest', '/missing-manifest.json']]
+                    if manifest_first:
+                        options.reverse()
+                    result = subprocess.run(
+                        [sys.executable, str(Path(driver.__file__)), '/missing-data',
+                         '/missing-queries.sql', '/unused-times.csv',
+                         *[value for pair in options for value in pair]],
+                        capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn('--input_format', result.stderr)
+                    self.assertIn('--dataset_manifest', result.stderr)
+                    self.assertIn('not allowed with argument', result.stderr)
 
     def test_omission_ignores_colocated_manifest_and_preserves_nds_tables(self):
         self.assert_driver_table_selection(explicit=False)
@@ -103,7 +129,7 @@ class ManifestHelpersTest(unittest.TestCase):
             builder.appName.return_value.getOrCreate.return_value = session
             loaded = {}
             def setup(*args):
-                loaded['tables'], loaded['dates'] = list(args[8]), args[9]
+                loaded['tables'] = args[8]
                 return args[4]
             def analyze(spark, mode, names, folder):
                 loaded['analyzed'] = list(names)
@@ -117,9 +143,13 @@ class ManifestHelpersTest(unittest.TestCase):
                     str(root), None, {}, str(root / 'times.csv'), None, None, None, 0, 1, None,
                     analyze='all_columns', dataset_manifest=str(manifest) if explicit else None)
             expected = list(tables) if explicit else list(driver.get_schemas(False))
-            self.assertEqual(loaded['tables'], expected)
+            self.assertEqual(list(loaded['tables']), expected)
+            self.assertEqual({table['format'] for table in loaded['tables'].values()}, {'parquet'})
             self.assertEqual(loaded['analyzed'], expected)
-            self.assertEqual(loaded['dates'], {'orders': 'order_day'} if explicit
+            dates = {name: table['date_partition_column']
+                     for name, table in loaded['tables'].items()
+                     if table['date_partition_column'] is not None}
+            self.assertEqual(dates, {'orders': 'order_day'} if explicit
                              else driver.DATE_PARTITION_COLUMNS)
 
 

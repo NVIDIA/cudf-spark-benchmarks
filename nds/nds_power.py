@@ -159,9 +159,22 @@ def _manifest_tables(spark_session, manifest_path):
         column = table.get('date_partition_column')
         if column is not None and (not isinstance(column, str) or not column):
             raise ValueError('date_partition_column must be a nonempty string or null: ' + name)
-    date_columns = {name: table['date_partition_column'] for name, table in tables.items()
-                    if table.get('date_partition_column') is not None}
-    return list(tables), date_columns
+    return tables
+
+
+def _dataset_tables(input_prefix, input_format, use_decimal, manifest_tables=None):
+    """Resolve each table's source and loading metadata before registration."""
+    schemas = get_schemas(use_decimal) if manifest_tables is None else {}
+    tables = (manifest_tables if manifest_tables is not None else
+              {name: {'date_partition_column': DATE_PARTITION_COLUMNS.get(name)}
+               for name in schemas})
+    return {
+        name: {'path': input_prefix + '/' + name,
+               'format': input_format,
+               'schema': schemas.get(name) if input_format in ('csv', 'json') else None,
+               'date_partition_column': metadata.get('date_partition_column')}
+        for name, metadata in tables.items()
+    }
 
 
 def _parse_cutoff_date(value):
@@ -376,7 +389,7 @@ def gen_sql_from_stream(query_stream_file_path):
 
 def setup_tables(spark_session, input_prefix, input_format, use_decimal, execution_time_list,
                  analyze_tables=False, cutoff_date=None, analyze=None,
-                 table_names=None, date_partition_columns=None):
+                 tables=None):
     """set up data tables in Spark before running the Power Run queries.
 
     Args:
@@ -388,24 +401,22 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
         analyze_tables (bool): whether to register catalog tables and compute table statistics.
         cutoff_date (date): include dated fact partitions through this date, plus NULL.
         analyze (str): optional none, table, or all_columns statistics mode.
-        table_names (list): custom manifest tables, otherwise the TPC-DS table list.
-        date_partition_columns (dict): custom date columns, otherwise TPC-DS fact columns.
+        tables (dict): resolved table definitions, otherwise the built-in NDS dataset.
 
     Returns:
         execution_time_list: a list recording query execution time.
     """
-    table_names = get_schemas(False).keys() if table_names is None else table_names
-    date_partition_columns = (DATE_PARTITION_COLUMNS if date_partition_columns is None else
-                              date_partition_columns)
+    tables = (_dataset_tables(input_prefix, input_format, use_decimal)
+              if tables is None else tables)
     statistics_requested = analyze_tables or analyze in ('table', 'all_columns')
     if analyze in ('table', 'all_columns'):
-        require_fresh_catalog_tables(spark_session, table_names)
+        require_fresh_catalog_tables(spark_session, tables)
     spark_app_id = _get_app_id(spark_session)
     partitions = {}
     if cutoff_date is not None:
         start = int(time.time() * 1000)
         if analyze_tables:
-            for table_name in table_names:
+            for table_name in tables:
                 _require_fresh_catalog_table(spark_session, table_name)
         if isinstance(cutoff_date, str):
             cutoff_date = _parse_cutoff_date(cutoff_date)
@@ -416,26 +427,27 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
             # date keys only when encountered, sharing one mapping across tables.
             nonlocal dates
             if dates is None:
-                if 'date_dim' not in table_names:
+                if 'date_dim' not in tables:
                     raise ValueError('Integer date partitions require date_dim with '
                                      'd_date_sk and d_date columns in the manifest')
                 dates = _date_key_mapping(spark_session, input_prefix, input_format, use_decimal)
             return dates
 
-        for table_name, column in date_partition_columns.items():
-            partitions[table_name] = _partitions_at_cutoff(
-                spark_session, input_prefix + '/' + table_name, column, get_date_keys, cutoff_date)
+        for table_name, table in tables.items():
+            column = table['date_partition_column']
+            if column is not None:
+                partitions[table_name] = _partitions_at_cutoff(
+                    spark_session, table['path'], column, get_date_keys, cutoff_date)
         cutoff_setup_time = int(time.time() * 1000) - start
         print("====== Power Cutoff Setup Time: {} milliseconds ======".format(cutoff_setup_time))
         execution_time_list.append((spark_app_id, "Power Cutoff Setup Time", cutoff_setup_time))
     # Create TempViews or data source tables
-    for table_name in table_names:
+    for table_name, table in tables.items():
         start = int(time.time() * 1000)
-        table_path = input_prefix + '/' + table_name
-        reader =  spark_session.read.format(input_format)
-        schema = None
-        if input_format in ['csv', 'json']:
-            schema = get_schemas(use_decimal)[table_name]
+        table_path = table['path']
+        reader = spark_session.read.format(table['format'])
+        schema = table['schema']
+        if schema is not None:
             reader = reader.schema(schema)
         if table_name in partitions:
             selected = partitions[table_name]
@@ -443,12 +455,12 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
                 [path for _, path in selected])
             if statistics_requested:
                 _create_data_source_table(
-                    spark_session, table_name, table_path, input_format, selected_frame.schema,
-                    selected, date_partition_columns[table_name])
+                    spark_session, table_name, table_path, table['format'], selected_frame.schema,
+                    selected, table['date_partition_column'])
             else:
                 selected_frame.createOrReplaceTempView(table_name)
         elif statistics_requested:
-            _create_data_source_table(spark_session, table_name, table_path, input_format, schema)
+            _create_data_source_table(spark_session, table_name, table_path, table['format'], schema)
         else:
             reader.load(table_path).createOrReplaceTempView(table_name)
         end = int(time.time() * 1000)
@@ -594,7 +606,7 @@ def run_query_stream(input_prefix,
                      warmup_iterations,
                      iterations,
                      plan_types,
-                     input_format="parquet",
+                     input_format=None,
                      use_decimal=True,
                      output_path=None,
                      output_format="parquet",
@@ -626,9 +638,12 @@ def run_query_stream(input_prefix,
         analyze_tables (bool, optional): whether to compute table statistics after creating tables.
         dataset_manifest (str, optional): explicit driver-local JSON file or Hadoop-supported URI.
     """
-    if dataset_manifest is not None and (input_format != 'parquet' or spark_connect or hive_external):
+    if dataset_manifest is not None and input_format is not None:
+        raise ValueError('--dataset_manifest and --input_format cannot be combined')
+    if dataset_manifest is not None and (spark_connect or hive_external):
         raise ValueError('--dataset_manifest requires file-backed Parquet inputs '
                          'and a classic Spark session (not Spark Connect)')
+    input_format = 'parquet' if input_format is None else input_format
     if analyze_tables and analyze is not None:
         raise ValueError('--analyze and --analyze_tables cannot be combined')
     if analyze == 'none':
@@ -683,8 +698,7 @@ def run_query_stream(input_prefix,
     manifest_tables = None
     if dataset_manifest is not None:
         manifest_tables = _manifest_tables(spark_session, dataset_manifest)
-    table_names, date_partition_columns = (manifest_tables or
-                                          (get_schemas(False).keys(), DATE_PARTITION_COLUMNS))
+    tables = _dataset_tables(input_prefix, input_format, use_decimal, manifest_tables)
     if input_format == 'delta' and delta_unmanaged:
         # Register tables for Delta Lake. This is only needed for unmanaged tables.
         execution_time_list = register_delta_tables(spark_session, input_prefix, execution_time_list)
@@ -693,12 +707,12 @@ def run_query_stream(input_prefix,
         execution_time_list = setup_tables(spark_session, input_prefix, input_format, use_decimal,
                                            execution_time_list,
                                            analyze_tables, cutoff_date, analyze,
-                                           table_names, date_partition_columns)
+                                           tables)
 
     check_json_summary_folder(json_summary_folder)
     clear_statistics_summary(json_summary_folder)
     if analyze is not None:
-        analyze_catalog(spark_session, analyze, table_names, json_summary_folder)
+        analyze_catalog(spark_session, analyze, tables, json_summary_folder)
     if sub_queries:
         query_dict = get_query_subset(query_dict, sub_queries)
     if sub_query_patterns:
@@ -842,16 +856,17 @@ if __name__ == "__main__":
     parser.add_argument('time_log',
                         help='path to execution time log, only support local path.',
                         default="")
-    parser.add_argument('--input_format',
+    dataset_source = parser.add_mutually_exclusive_group()
+    dataset_source.add_argument('--input_format',
                         help='type for input data source, e.g. parquet, orc, json, csv or iceberg, delta. ' +
                         'Certain types are not fully supported by GPU reading, please refer to ' +
                         'https://github.com/NVIDIA/cudf-spark/blob/main/docs/compatibility.md ' +
                         'for more details.',
                         choices=['parquet', 'orc', 'avro', 'csv', 'json', 'iceberg', 'delta'],
-                        default='parquet')
-    parser.add_argument('--dataset_manifest',
+                        default=None)
+    dataset_source.add_argument('--dataset_manifest',
                         help='Explicit dataset manifest: a driver-local file or Hadoop-supported URI. '
-                             'Requires file-backed Parquet and classic Spark.')
+                             'Defines custom Parquet tables instead of --input_format; requires classic Spark.')
     parser.add_argument('--cutoff_date', type=_parse_cutoff_date,
                         help='Restrict dated fact partitions through this ISO date, plus NULL. '
                              'Does not shift SQL dates; callers must supply queries whose dates fit '

@@ -83,12 +83,14 @@ class ManifestTableTest(unittest.TestCase):
         self.spark.sql('CREATE DATABASE manifest_statistics')
         self.spark.catalog.setCurrentDatabase('manifest_statistics')
         try:
-            names, columns = nds_power._manifest_tables(self.spark, str(self.manifest))
+            tables = nds_power._dataset_tables(
+                str(self.root), 'parquet', False,
+                nds_power._manifest_tables(self.spark, str(self.manifest)))
             nds_power.setup_tables(
                 self.spark, str(self.root), 'parquet', False, [],
                 cutoff_date=datetime.date(1998, 1, 2), analyze='all_columns',
-                table_names=names, date_partition_columns=columns)
-            report = nds_power.analyze_catalog(self.spark, 'all_columns', names, None)
+                tables=tables)
+            report = nds_power.analyze_catalog(self.spark, 'all_columns', tables, None)
             self.assertEqual({entry['table'] for entry in report['tables']}, set(self.tables))
             self.assertEqual({table.name for table in self.spark.catalog.listTables()}, set(self.tables))
             for name in ('orders', 'events'):
@@ -105,11 +107,13 @@ class ManifestTableTest(unittest.TestCase):
         self.spark.sql('CREATE DATABASE manifest_legacy_statistics')
         self.spark.catalog.setCurrentDatabase('manifest_legacy_statistics')
         try:
-            names, columns = nds_power._manifest_tables(self.spark, str(self.manifest))
+            tables = nds_power._dataset_tables(
+                str(self.root), 'parquet', False,
+                nds_power._manifest_tables(self.spark, str(self.manifest)))
             nds_power.setup_tables(
                 self.spark, str(self.root), 'parquet', False, [],
                 analyze_tables=True, cutoff_date=datetime.date(1998, 1, 2),
-                table_names=names, date_partition_columns=columns)
+                tables=tables)
             self.assertEqual({table.name for table in self.spark.catalog.listTables()}, set(self.tables))
             for name in ('orders', 'events'):
                 self.assertEqual({row[0] for row in self.spark.table(name).select('payload').collect()},
@@ -131,11 +135,13 @@ class ManifestTableTest(unittest.TestCase):
         self.manifest.write_text(json.dumps({'tables': {'orders': self.tables['orders']}}))
         try:
             self.assertEqual(nds_power._manifest_tables(self.spark, str(self.manifest)),
-                             (['orders'], {'orders': 'order_day'}))
+                             {'orders': {'date_partition_column': 'order_day'}})
             with self.assertRaisesRegex(ValueError, 'Integer date partitions require date_dim'):
                 nds_power.setup_tables(
                     self.spark, str(self.root), 'parquet', False, [],
-                    table_names=['orders'], date_partition_columns={'orders': 'order_day'},
+                    tables=nds_power._dataset_tables(
+                        str(self.root), 'parquet', False,
+                        {'orders': {'date_partition_column': 'order_day'}}),
                     cutoff_date=datetime.date(1998, 1, 2))
         finally:
             self.manifest.write_text(json.dumps({'tables': self.tables}))

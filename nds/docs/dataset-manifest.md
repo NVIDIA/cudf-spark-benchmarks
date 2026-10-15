@@ -12,6 +12,13 @@ place of the built-in TPC-DS definitions. Spark infers the schemas from your
 Parquet files. The driver provides query execution, result writing and statistics
 collection.
 
+Choose one way to define the dataset. Without a manifest, `--input_format`
+selects the format for the standard NDS tables and defaults to Parquet. With
+`--dataset_manifest`, the manifest selects your tables; currently these must be
+Parquet. The two options cannot be supplied together, even with an explicit
+`--input_format parquet`. Run options such as `--app_name`, `--cutoff_date` and
+`--analyze` still apply.
+
 ## Dataset layout
 
 The `input_prefix` argument points to your dataset root. Each table listed in the
