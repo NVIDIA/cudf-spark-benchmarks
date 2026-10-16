@@ -109,7 +109,8 @@ def get_valid_query_names(spec_queries):
         DM_FUNCS = spec_queries
     return DM_FUNCS
 
-def create_spark_session(valid_queries, warehouse_path, warehouse_type):
+def create_spark_session(valid_queries, warehouse_path, warehouse_type,
+                         delta_unmanaged=False):
     if len(valid_queries) == 1:
         app_name = "NDS - Data Maintenance - " + valid_queries[0]
     else:
@@ -121,6 +122,10 @@ def create_spark_session(valid_queries, warehouse_path, warehouse_type):
     if warehouse_type == "iceberg":
         spark_session_builder.config("spark.sql.catalog.spark_catalog.warehouse", warehouse_path)
     spark_session = spark_session_builder.appName(app_name).getOrCreate()
+    if warehouse_type == 'delta' and delta_unmanaged:
+        # Register refresh-data views and clones in a run-owned namespace so the
+        # caller's current database and temporary views remain untouched.
+        spark_session = spark_session.newSession()
     return spark_session
 
 def get_maintenance_queries(spark_session, folder, valid_queries):
@@ -224,35 +229,47 @@ def run_query(spark_session,
     # Run query
     total_time_start = datetime.now()
     spark_app_id = spark_session.sparkContext.applicationId
-    DM_start = datetime.now()
-    if warehouse_type == 'delta' and delta_unmanaged:
-        execution_time_list = register_delta_tables(spark_session, warehouse_path, execution_time_list)
-    for query_name, q_content in query_dict.items():
-        # show query name in Spark web UI
-        setQueryName(spark_session, query_name)
-        print(f"====== Run {query_name} ======")
-        q_report = PysparkBenchReport(spark_session, query_name)
-        summary = q_report.report_on(run_dm_query, 0, 1,
-                                                    spark_session,
-                                                    q_content,
-                                                    query_name,
-                                                    warehouse_type)
-        print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
-        execution_time_list.append((spark_app_id, query_name, summary['queryTimes']))
-        if json_summary_folder:
-            # property_file e.g.: "property/aqe-on.properties" or just "aqe-off.properties"
-            if property_file:
-                summary_prefix = os.path.join(
-                    json_summary_folder, os.path.basename(property_file).split('.')[0])
-            else:
-                summary_prefix =  os.path.join(json_summary_folder, '')
-            q_report.write_summary(prefix=summary_prefix)
-    clearQueryName(spark_session)
-    if not keep_sc:
-        spark_session.sparkContext.stop()
-    DM_end = datetime.now()
+    delta_clone_scope = None
+    try:
+        if warehouse_type == 'delta' and delta_unmanaged:
+            execution_time_list, delta_clone_scope = register_delta_tables(
+                spark_session, warehouse_path, execution_time_list)
+        # Clone creation is run isolation rather than refresh DML. Keep it out of the scored
+        # maintenance interval and account for the complete clone lifecycle in Total Time.
+        DM_start = datetime.now()
+        for query_name, q_content in query_dict.items():
+            # show query name in Spark web UI
+            setQueryName(spark_session, query_name)
+            print(f"====== Run {query_name} ======")
+            q_report = PysparkBenchReport(spark_session, query_name)
+            summary = q_report.report_on(run_dm_query, 0, 1,
+                                         spark_session,
+                                         q_content,
+                                         query_name,
+                                         warehouse_type)
+            print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
+            execution_time_list.append((spark_app_id, query_name, summary['queryTimes']))
+            if json_summary_folder:
+                # property_file e.g.: "property/aqe-on.properties" or just "aqe-off.properties"
+                if property_file:
+                    summary_prefix = os.path.join(
+                        json_summary_folder, os.path.basename(property_file).split('.')[0])
+                else:
+                    summary_prefix = os.path.join(json_summary_folder, '')
+                q_report.write_summary(prefix=summary_prefix)
+        clearQueryName(spark_session)
+        DM_end = datetime.now()
+    finally:
+        try:
+            if delta_clone_scope is not None:
+                delta_clone_scope.close()
+        finally:
+            total_time_end = datetime.now()
+            if not keep_sc:
+                spark_session.sparkContext.stop()
+
     DM_elapse = (DM_end - DM_start).total_seconds()
-    total_elapse = (DM_end - total_time_start).total_seconds()
+    total_elapse = (total_time_end - total_time_start).total_seconds()
     print(f"====== Data Maintenance Start Time: {DM_start}")
     print(f"====== Data Maintenance Time: {DM_elapse} s ======")
     print(f"====== Total Time: {total_elapse} s ======")
@@ -312,11 +329,13 @@ if __name__ == "__main__":
                         'this flag when running on Databricks.')
     parser.add_argument('--delta_unmanaged',
                         action='store_true',
-                        help='Use unmanaged tables for DeltaLake. This is useful for testing DeltaLake without ' +
-        '               leveraging a Metastore service.')
+                        help='Run against run-scoped managed shallow clones of path-based Delta ' +
+                        'tables. Requires a writable catalog and managed table storage; source ' +
+                        'tables are not modified.')
     args = parser.parse_args()
     valid_queries = get_valid_query_names(args.maintenance_queries)
-    spark_session = create_spark_session(valid_queries, args.warehouse_path, args.warehouse_type)
+    spark_session = create_spark_session(valid_queries, args.warehouse_path,
+                                         args.warehouse_type, args.delta_unmanaged)
     register_temp_views(spark_session, args.refresh_data_path)
     query_dict = get_maintenance_queries(spark_session,
                                          args.maintenance_queries_folder,
