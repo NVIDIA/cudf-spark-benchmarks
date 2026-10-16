@@ -15,10 +15,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'utils'))
 import benchmark_statistics as statistics
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_driver(folder, script):
