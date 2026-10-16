@@ -36,7 +36,7 @@ def partition_session(entries):
     filesystem.listStatus = lambda path: [
         SimpleNamespace(getPath=lambda name=name: FakePath('/facts/' + name, filesystem),
                         isDirectory=lambda directory=directory: directory)
-        for name, directory in entries]
+        for name, directory in entries] if path.path == "/facts" else []
     return SimpleNamespace(
         _jvm=SimpleNamespace(org=SimpleNamespace(apache=SimpleNamespace(
             hadoop=SimpleNamespace(fs=SimpleNamespace(
@@ -60,6 +60,7 @@ class CutoffSelectionTest(unittest.TestCase):
                         return {}
 
                     def select_partitions(*args):
+                        args[3]()
                         clock[0] += 0.250
                         return [('1', '/facts/date=1')]
 
@@ -81,11 +82,28 @@ class CutoffSelectionTest(unittest.TestCase):
                    ('ss_sold_date_sk=2', True)]
         dates = {key: datetime.date(2001, 1, key) for key in (1, 2, 3)}
         selected = driver._partitions_at_cutoff(
-            partition_session(entries), '/facts', 'ss_sold_date_sk', dates,
+            partition_session(entries), '/facts', 'ss_sold_date_sk', lambda: dates,
             datetime.date(2001, 1, 2))
         self.assertEqual(selected, [
-            ('1', '/facts/ss_sold_date_sk=1'), ('2', '/facts/ss_sold_date_sk=2'),
-            ('__HIVE_DEFAULT_PARTITION__', '/facts/ss_sold_date_sk=__HIVE_DEFAULT_PARTITION__')])
+            ({'ss_sold_date_sk': '1'}, '/facts/ss_sold_date_sk=1'),
+            ({'ss_sold_date_sk': '2'}, '/facts/ss_sold_date_sk=2'),
+            ({'ss_sold_date_sk': '__HIVE_DEFAULT_PARTITION__'},
+             '/facts/ss_sold_date_sk=__HIVE_DEFAULT_PARTITION__')])
+
+    def test_calendar_date_partitions_need_no_date_dimension(self):
+        entries = [('order_date=2001-01-03', True), ('order_date=2001-01-01', True),
+                   ('order_date=__HIVE_DEFAULT_PARTITION__', True),
+                   ('order_date=2001-01-02', True)]
+        def unexpected_mapping():
+            raise AssertionError('Calendar dates do not require a date dimension')
+        selected = driver._partitions_at_cutoff(
+            partition_session(entries), '/facts', 'order_date', unexpected_mapping,
+            datetime.date(2001, 1, 2))
+        self.assertEqual(selected, [
+            ({'order_date': '2001-01-01'}, '/facts/order_date=2001-01-01'),
+            ({'order_date': '2001-01-02'}, '/facts/order_date=2001-01-02'),
+            ({'order_date': '__HIVE_DEFAULT_PARTITION__'},
+             '/facts/order_date=__HIVE_DEFAULT_PARTITION__')])
 
     def test_rejects_invalid_layout_dates_and_null_only_selection(self):
         for entry, message in [
@@ -96,7 +114,7 @@ class CutoffSelectionTest(unittest.TestCase):
             with self.subTest(entry=entry), self.assertRaisesRegex(ValueError, message):
                 driver._partitions_at_cutoff(
                     partition_session([entry]), '/facts', 'ss_sold_date_sk',
-                    {1: datetime.date(2001, 1, 1)}, datetime.date(2001, 1, 2))
+                    lambda: {1: datetime.date(2001, 1, 1)}, datetime.date(2001, 1, 2))
         for column in driver.DATE_PARTITION_COLUMNS.values():
             for entries in ([], [(column + '=__HIVE_DEFAULT_PARTITION__', True)],
                             [(column + '=1', True),
@@ -105,7 +123,7 @@ class CutoffSelectionTest(unittest.TestCase):
                         ValueError, 'No dated partitions at or before 2001-01-02'):
                     driver._partitions_at_cutoff(
                         partition_session(entries), '/facts', column,
-                        {1: datetime.date(2001, 1, 3)}, datetime.date(2001, 1, 2))
+                        lambda: {1: datetime.date(2001, 1, 3)}, datetime.date(2001, 1, 2))
 
     def test_parser_errors_are_readable_and_mapping_rejects_bad_dates(self):
         self.assertEqual(driver._parse_cutoff_date('2001-01-02'), datetime.date(2001, 1, 2))

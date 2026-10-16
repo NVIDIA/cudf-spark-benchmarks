@@ -155,20 +155,17 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             driver._create_data_source_table(
                 session, 'facts', '/facts', 'parquet',
-                partitions=[('2', '/facts/day_key=2'),
-                            ('__HIVE_DEFAULT_PARTITION__', '/facts/day_key=__HIVE_DEFAULT_PARTITION__')],
-                partition_column='day_key')
+                partitions=[({'day_key': '2'}, '/facts/day_key=2'),
+                            ({'day_key': '__HIVE_DEFAULT_PARTITION__'}, '/facts/day_key=__HIVE_DEFAULT_PARTITION__')])
         self.assertNotIn('/facts/day_key=', output.getvalue())
         catalog.tableExists = lambda name: True
         with self.assertRaisesRegex(ValueError, 'fresh catalog'):
             driver._create_data_source_table(
-                session, 'facts', '/facts', 'parquet', partitions=[('2', '/facts/day_key=2')],
-                partition_column='day_key')
+                session, 'facts', '/facts', 'parquet', partitions=[({'day_key': '2'}, '/facts/day_key=2')])
         session.conf.get = lambda *args: 'false'
         with self.assertRaisesRegex(ValueError, 'manageFilesourcePartitions=true'):
             driver._create_data_source_table(
-                session, 'facts', '/facts', 'parquet', partitions=[('2', '/facts/day_key=2')],
-                partition_column='day_key')
+                session, 'facts', '/facts', 'parquet', partitions=[({'day_key': '2'}, '/facts/day_key=2')])
 
     def test_actual_driver_guards_reject_legacy_connect_and_external_hive(self):
         for folder, script in (('nds', 'nds_power.py'), ('nds-h', 'nds_h_power.py')):

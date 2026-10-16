@@ -367,10 +367,18 @@ being ignored for Delta and Iceberg inputs. The two options cannot appear
 together, even with `--analyze none`. Repeated `--analyze` options use the last
 value supplied.
 
+Use the NDS power driver as a generic benchmark runner by supplying your own
+SQL stream and Parquet dataset. Pass
+[`--dataset_manifest PATH`](docs/dataset-manifest.md) to define the tables to load
+and optionally their date-partition columns for `--cutoff_date`. Without a
+manifest, the driver uses the standard TPC-DS table definitions and
+`--input_format` selects their format (Parquet by default). `--dataset_manifest`
+and `--input_format` cannot appear together, even with `--input_format parquet`.
+
 Arguments supported by `nds_power.py`:
 
 ```text
-usage: nds_power.py [-h] [--input_format {parquet,orc,avro,csv,json,iceberg,delta}] [--output_prefix OUTPUT_PREFIX] [--output_format OUTPUT_FORMAT] [--property_file PROPERTY_FILE] [--floats] [--json_summary_folder JSON_SUMMARY_FOLDER] [--delta_unmanaged] [--hive] [--app_name APP_NAME] [--cutoff_date CUTOFF_DATE] input_prefix query_stream_file time_log
+usage: nds_power.py [-h] [--input_format {parquet,orc,avro,csv,json,iceberg,delta} | --dataset_manifest DATASET_MANIFEST] [--output_prefix OUTPUT_PREFIX] [--output_format OUTPUT_FORMAT] [--property_file PROPERTY_FILE] [--floats] [--json_summary_folder JSON_SUMMARY_FOLDER] [--delta_unmanaged] [--hive] [--app_name APP_NAME] [--cutoff_date CUTOFF_DATE] input_prefix query_stream_file time_log
 
 positional arguments:
   input_prefix          text to prepend to every input file path (e.g., "hdfs:///ds-generated-data"). If input_format is "iceberg", this argument will be regarded as the value of property "spark.sql.catalog.spark_catalog.warehouse". Only default Spark catalog session name
@@ -386,6 +394,8 @@ optional arguments:
   --cutoff_date CUTOFF_DATE
                         load dated fact partitions through YYYY-MM-DD, plus NULL-date partitions;
                         the caller supplies queries whose dates fit the loaded range.
+  --dataset_manifest DATASET_MANIFEST
+                        driver-local JSON file or Hadoop filesystem URI defining custom Parquet tables.
   --output_prefix OUTPUT_PREFIX
                         text to prepend to every output file (e.g., "hdfs:///ds-parquet")
   --output_format OUTPUT_FORMAT
