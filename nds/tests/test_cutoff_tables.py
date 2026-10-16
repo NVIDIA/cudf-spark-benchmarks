@@ -36,7 +36,7 @@ def partition_session(entries):
     filesystem.listStatus = lambda path: [
         SimpleNamespace(getPath=lambda name=name: FakePath('/facts/' + name, filesystem),
                         isDirectory=lambda directory=directory: directory)
-        for name, directory in entries]
+        for name, directory in entries] if path.path == "/facts" else []
     return SimpleNamespace(
         _jvm=SimpleNamespace(org=SimpleNamespace(apache=SimpleNamespace(
             hadoop=SimpleNamespace(fs=SimpleNamespace(
@@ -85,8 +85,10 @@ class CutoffSelectionTest(unittest.TestCase):
             partition_session(entries), '/facts', 'ss_sold_date_sk', lambda: dates,
             datetime.date(2001, 1, 2))
         self.assertEqual(selected, [
-            ('1', '/facts/ss_sold_date_sk=1'), ('2', '/facts/ss_sold_date_sk=2'),
-            ('__HIVE_DEFAULT_PARTITION__', '/facts/ss_sold_date_sk=__HIVE_DEFAULT_PARTITION__')])
+            ({'ss_sold_date_sk': '1'}, '/facts/ss_sold_date_sk=1'),
+            ({'ss_sold_date_sk': '2'}, '/facts/ss_sold_date_sk=2'),
+            ({'ss_sold_date_sk': '__HIVE_DEFAULT_PARTITION__'},
+             '/facts/ss_sold_date_sk=__HIVE_DEFAULT_PARTITION__')])
 
     def test_calendar_date_partitions_need_no_date_dimension(self):
         entries = [('order_date=2001-01-03', True), ('order_date=2001-01-01', True),
@@ -98,9 +100,10 @@ class CutoffSelectionTest(unittest.TestCase):
             partition_session(entries), '/facts', 'order_date', unexpected_mapping,
             datetime.date(2001, 1, 2))
         self.assertEqual(selected, [
-            ('2001-01-01', '/facts/order_date=2001-01-01'),
-            ('2001-01-02', '/facts/order_date=2001-01-02'),
-            ('__HIVE_DEFAULT_PARTITION__', '/facts/order_date=__HIVE_DEFAULT_PARTITION__')])
+            ({'order_date': '2001-01-01'}, '/facts/order_date=2001-01-01'),
+            ({'order_date': '2001-01-02'}, '/facts/order_date=2001-01-02'),
+            ({'order_date': '__HIVE_DEFAULT_PARTITION__'},
+             '/facts/order_date=__HIVE_DEFAULT_PARTITION__')])
 
     def test_rejects_invalid_layout_dates_and_null_only_selection(self):
         for entry, message in [

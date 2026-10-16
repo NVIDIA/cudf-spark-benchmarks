@@ -39,7 +39,7 @@ import re
 import sys
 import time
 from collections import OrderedDict
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from pyspark.sql import SparkSession
 from PysparkBenchReport import PysparkBenchReport
 from pyspark.sql import DataFrame
@@ -91,15 +91,16 @@ def _require_fresh_catalog_table(spark_session, table_name):
 
 
 def _create_data_source_table(spark_session, table_name, table_path, input_format, schema=None,
-                              partitions=None, partition_column=None):
+                              partitions=None):
     if partitions is not None:
         if spark_session.conf.get('spark.sql.hive.manageFilesourcePartitions', 'true').lower() == 'false':
             raise ValueError('Cutoff catalog tables require spark.sql.hive.manageFilesourcePartitions=true')
         _require_fresh_catalog_table(spark_session, table_name)
     table_identifier = _quote_identifier(table_name)
     schema_clause = " ({})".format(_schema_to_ddl(schema)) if schema else ""
-    partition_clause = (" PARTITIONED BY ({})".format(_quote_identifier(partition_column))
-                        if partitions is not None else "")
+    partition_clause = (" PARTITIONED BY ({})".format(
+        ", ".join(_quote_identifier(column) for column in partitions[0][0]))
+        if partitions is not None else "")
     create_sql = "CREATE TABLE IF NOT EXISTS {}{} USING {}{} LOCATION {}".format(
         table_identifier,
         schema_clause,
@@ -111,10 +112,11 @@ def _create_data_source_table(spark_session, table_name, table_path, input_forma
     spark_session.sql(create_sql)
     if partitions is not None:
         clauses = [
-            "PARTITION ({}={}) LOCATION {}".format(
-                _quote_identifier(partition_column), _quote_sql_string(value),
+            "PARTITION ({}) LOCATION {}".format(
+                ", ".join("{}={}".format(_quote_identifier(column), _quote_sql_string(value))
+                          for column, value in specification.items()),
                 _quote_sql_string(path))
-            for value, path in partitions
+            for specification, path in partitions
         ]
         if clauses:
             spark_session.sql("ALTER TABLE {} ADD IF NOT EXISTS {}".format(
@@ -201,19 +203,41 @@ def _date_key_mapping(spark_session, input_prefix, input_format, use_decimal):
 
 
 def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_keys, cutoff_date):
-    """Select date partitions, resolving integer keys through a lazily loaded date dimension."""
+    """Select complete directory partitions using a date column at any partition depth."""
     path = spark_session._jvm.org.apache.hadoop.fs.Path(table_path)
     filesystem = path.getFileSystem(spark_session.sparkContext._jsc.hadoopConfiguration())
     partitions = []
+    partition_columns = None
     has_dated_partition = False
-    for entry in filesystem.listStatus(path):
-        name = entry.getPath().getName()
-        if name.startswith(('_', '.')):
-            continue
-        prefix = partition_column + '='
-        if not entry.isDirectory() or not name.startswith(prefix):
-            raise ValueError("Unexpected partition layout at " + entry.getPath().toString())
-        value = name[len(prefix):]
+
+    def visit(directory, specification):
+        nonlocal partition_columns, has_dated_partition
+        entries = [entry for entry in filesystem.listStatus(directory)
+                   if not entry.getPath().getName().startswith(('_', '.'))]
+        directories = [entry for entry in entries if entry.isDirectory()]
+        if directories:
+            if len(directories) != len(entries):
+                raise ValueError("Unexpected partition layout at " + directory.toString())
+            for entry in directories:
+                name = entry.getPath().getName()
+                column, separator, value = name.partition('=')
+                column = unquote(column)
+                if not separator or not column or column in specification:
+                    raise ValueError("Unexpected partition layout at " + entry.getPath().toString())
+                visit(entry.getPath(), {**specification, column: unquote(value)})
+            return
+        if not entries and not specification:
+            return
+        if partition_column not in specification:
+            raise ValueError("Unexpected partition layout at " + directory.toString())
+        # Preserve every partition column for Spark's catalog, including columns
+        # before or after the date. Registering only the date loses other values.
+        columns = tuple(specification)
+        if partition_columns is None:
+            partition_columns = columns
+        elif columns != partition_columns:
+            raise ValueError("Inconsistent partition columns at " + directory.toString())
+        value = specification[partition_column]
         if value != '__HIVE_DEFAULT_PARTITION__':
             try:
                 key = int(value)
@@ -221,19 +245,21 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_
                 try:
                     partition_date = datetime.datetime.strptime(value, '%Y-%m-%d').date()
                 except ValueError:
-                    raise ValueError("Invalid date partition at " + entry.getPath().toString())
+                    raise ValueError("Invalid date partition at " + directory.toString())
             else:
                 dates = get_date_keys()
                 if key not in dates:
                     raise ValueError("Partition date key missing from date_dim: " + value)
                 partition_date = dates[key]
             if partition_date > cutoff_date:
-                continue
+                return
             has_dated_partition = True
-        partitions.append((value, entry.getPath().toString()))
+        partitions.append((specification, directory.toString()))
+
+    visit(path, {})
     if not has_dated_partition:
         raise ValueError("No dated partitions at or before {} in {}".format(cutoff_date, table_path))
-    return sorted(partitions)
+    return sorted(partitions, key=lambda partition: partition[1])
 
 
 def split_and_strip(str, delimiter):
@@ -456,7 +482,7 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
             if statistics_requested:
                 _create_data_source_table(
                     spark_session, table_name, table_path, table['format'], selected_frame.schema,
-                    selected, table['date_partition_column'])
+                    selected)
             else:
                 selected_frame.createOrReplaceTempView(table_name)
         elif statistics_requested:

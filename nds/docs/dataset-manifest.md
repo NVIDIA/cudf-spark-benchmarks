@@ -105,8 +105,9 @@ in the catalog, to avoid analyzing data from an earlier run. When
 ## Date cutoffs
 
 To filter a listed table by `--cutoff_date YYYY-MM-DD`, set its
-`date_partition_column` to a nonempty column name. The table must use a single
-directory partition level. The driver recognizes these partition values:
+`date_partition_column` to a nonempty column name. It must identify a directory
+partition column, which can appear at any level in a table partitioned by
+multiple columns. The driver recognizes these partition values:
 
 - Calendar dates, such as `purchase_date=2001-07-01`, are compared directly
   with the cutoff. This layout needs no `date_dim` table.
@@ -122,6 +123,12 @@ not imply they are earlier than the cutoff. Every filtered table must have at
 least one dated partition selected. Tables without a date-partition column,
 including `date_dim` itself, remain complete. Analysis uses only the selected
 partitions.
+
+For example, both `purchases/region=west/purchase_date=2001-07-01/` and
+`purchases/purchase_date=2001-07-01/region=west/` work with
+`"date_partition_column": "purchase_date"`. The cutoff selects dates while
+retaining every region within each selected date. Other partition columns
+remain available to SQL queries.
 
 For Parquet partitioned by a DATE column, the manifest entries can be:
 
