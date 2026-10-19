@@ -75,6 +75,48 @@ class ManifestHelpersTest(unittest.TestCase):
                     driver._manifest_tables(session, 'hdfs:///custom.json')
                 self.assertTrue(scanner.closed)
 
+    def test_manifest_validates_names_fields_and_ordered_partition_metadata(self):
+        invalid = [
+            ({'': {}}, 'table names'), ({'..': {}}, 'table names'),
+            ({'my-table': {}}, 'table names'), ({'Foo': {}, 'foo': {}}, 'Duplicate manifest'),
+            ({'orders': {'date_partition_columns': 'day'}}, 'Unknown manifest table fields'),
+            ({'orders': {'partition_columns': 'day'}}, 'list of nonempty strings'),
+            ({'orders': {'partition_columns': None}}, 'list of nonempty strings'),
+            ({'orders': {'partition_columns': ['']}}, 'list of nonempty strings'),
+            ({'orders': {'partition_columns': ['day', 'DAY']}}, 'Duplicate partition_columns'),
+            ({'orders': {'partition_columns': [], 'date_partition_column': 'day'}},
+             'must occur in partition_columns'),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'manifest.json'
+            for tables, error in invalid:
+                path.write_text(json.dumps({'tables': tables}))
+                with self.subTest(tables=tables), self.assertRaisesRegex(ValueError, error):
+                    driver._manifest_tables(None, str(path))
+            valid = {'Foo': {'partition_columns': ['region', 'day'], 'date_partition_column': 'day'},
+                     'foo': {'partition_columns': []}}
+            path.write_text(json.dumps({'tables': valid, 'parameters': {'seed': 7}}))
+            session = SimpleNamespace(conf=SimpleNamespace(get=lambda *args: 'true'))
+            self.assertEqual(driver._manifest_tables(session, str(path)), valid)
+
+    def test_colon_filename_is_local_and_single_slash_file_uri_remains_supported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'workload:v2.json'
+            path.write_text(json.dumps({'tables': {'orders': {}}}))
+            # Use the relative spelling that urlparse would otherwise treat as a scheme.
+            with patch.object(driver.os.path, 'isfile', return_value=True), \
+                    patch('builtins.open', return_value=path.open()):
+                self.assertEqual(driver._manifest_tables(None, 'workload:v2.json'), {'orders': {}})
+            session, _ = self.session(json.dumps({'tables': {'orders': {}}}))
+            self.assertEqual(driver._manifest_tables(session, 'file:/metadata/custom.json'),
+                             {'orders': {}})
+
+    def test_builtin_nds_tables_describe_their_single_date_partition(self):
+        tables = driver._dataset_tables('/data', 'parquet', False)
+        self.assertEqual({name: table['partition_columns'] for name, table in tables.items()
+                          if table['partition_columns'] is not None},
+                         {name: [column] for name, column in driver.DATE_PARTITION_COLUMNS.items()})
+
     def test_explicit_manifest_requires_classic_file_backed_parquet(self):
         for options in ({'hive_external': True}, {'spark_connect': 'sc://localhost'}):
             with self.subTest(options=options):

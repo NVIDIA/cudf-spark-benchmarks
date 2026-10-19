@@ -33,7 +33,10 @@ class FakePath:
 
 def partition_session(entries, forbidden=()):
     filesystem = SimpleNamespace()
-    layout = entries if isinstance(entries, dict) else {'/facts': entries}
+    layout = entries if isinstance(entries, dict) else {
+        '/facts': entries,
+        **{'/facts/' + name: [('part.parquet', False)] for name, directory in entries if directory}
+    }
 
     def list_status(path):
         if path.path in forbidden:
@@ -76,6 +79,7 @@ class CutoffSelectionTest(unittest.TestCase):
                             patch.object(driver, '_date_key_mapping', side_effect=map_dates), \
                             patch.object(driver, '_partitions_at_cutoff', side_effect=select_partitions), \
                             patch.object(driver, '_create_data_source_table'), \
+                            patch.object(driver, '_require_partition_files'), \
                             contextlib.redirect_stdout(io.StringIO()):
                         timings = driver.setup_tables(session, '/facts', 'parquet', False, [],
                                                       analyze_tables=analyze, cutoff_date=cutoff)
@@ -149,6 +153,43 @@ class CutoffSelectionTest(unittest.TestCase):
                         datetime.date(2001, 1, 2))
                     self.assertEqual(selected, sorted(expected, key=lambda partition: partition[1]))
 
+    def test_declared_layout_stops_at_leaves_and_checks_the_column_order(self):
+        for columns in (['day'], ['day', '_tenant'], ['_tenant', 'day']):
+            with self.subTest(columns=columns):
+                layout, leaves = {}, set()
+                for day in ('2001-01-01', '2001-01-03'):
+                    path = '/facts'
+                    for column in columns:
+                        name = column + '=' + (day if column == 'day' else 'a')
+                        entries = layout.setdefault(path, [])
+                        if (name, True) not in entries:
+                            entries.append((name, True))
+                        path += '/' + name
+                    leaves.add(path)
+                selected = driver._partitions_at_cutoff(
+                    partition_session(layout, leaves), '/facts', 'day', lambda: {},
+                    datetime.date(2001, 1, 2), columns)
+                self.assertEqual([list(specification) for specification, _ in selected], [columns])
+                self.assertEqual(selected[0][0]['day'], '2001-01-01')
+        with self.assertRaisesRegex(ValueError, 'declared order'):
+            driver._partitions_at_cutoff(
+                partition_session({'/facts': [('region=west', True)]}), '/facts', 'day',
+                lambda: {}, datetime.date(2001, 1, 2), ['day', 'region'])
+
+    def test_discovery_ignores_empty_branches_and_preserves_spark_partition_decoding(self):
+        layout = {'/facts': [('region=empty', True), ('region=%C3%A9', True)],
+                  '/facts/region=empty': [],
+                  '/facts/region=%C3%A9': [('day=2001-01-01', True)],
+                  '/facts/region=%C3%A9/day=2001-01-01': [('part.parquet', False)]}
+        self.assertEqual(driver._partitions_at_cutoff(
+            partition_session(layout), '/facts', 'day', lambda: {}, datetime.date(2001, 1, 2)),
+            [({'region': 'Ã©', 'day': '2001-01-01'},
+              '/facts/region=%C3%A9/day=2001-01-01')])
+        with self.assertRaisesRegex(ValueError, 'No dated partitions'):
+            driver._partitions_at_cutoff(
+                partition_session({'/facts': [('day=2001-01-01', True)]}), '/facts', 'day',
+                lambda: {}, datetime.date(2001, 1, 2))
+
     def test_rejects_invalid_layout_dates_and_null_only_selection(self):
         for entry, message in [
                 (('other_column=1', True), 'Unexpected partition layout'),
@@ -178,6 +219,9 @@ class CutoffSelectionTest(unittest.TestCase):
         for rows in [
                 [SimpleNamespace(d_date_sk=None, d_date=datetime.date(2001, 1, 1))],
                 [SimpleNamespace(d_date_sk=1, d_date=None)],
+                [SimpleNamespace(d_date_sk='1', d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=True, d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=1, d_date=datetime.datetime(2001, 1, 1))],
                 [SimpleNamespace(d_date_sk=1, d_date='2001-01-01'),
                  SimpleNamespace(d_date_sk=1, d_date='2001-01-02')]]:
             selected = SimpleNamespace(collect=lambda: rows)

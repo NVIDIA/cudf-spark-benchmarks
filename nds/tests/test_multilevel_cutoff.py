@@ -48,6 +48,8 @@ class MultilevelCutoffTest(unittest.TestCase):
                     ('date' if kind == 'date' else 'int')).coalesce(1) \
                     .write.partitionBy(*columns).parquet(str(cls.root / table))
                 cls.definitions[table] = {'date_partition_column': 'event_day'}
+                if kind == 'date':
+                    cls.definitions[table]['partition_columns'] = list(columns)
                 cls.expected[table] = {row for row in values if row[0] not in (3, 6)}
         cls.manifest = cls.root / 'workload.json'
         cls.manifest.write_text(json.dumps({'tables': cls.definitions}))

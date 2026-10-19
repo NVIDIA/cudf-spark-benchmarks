@@ -70,7 +70,7 @@ def _quote_identifier(identifier):
     return "`{}`".format(identifier.replace("`", "``"))
 
 def _quote_sql_string(value):
-    return "'{}'".format(value.replace("'", "''"))
+    return "'{}'".format(value.replace("\\", "\\\\").replace("'", "\\'"))
 
 def _schema_to_ddl(schema):
     return ", ".join([
