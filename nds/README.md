@@ -342,6 +342,22 @@ With `--analyze_tables`, discovered file partitions are registered before
 collecting statistics, including NULL partitions. Partitioned and unpartitioned
 file-backed tables expose their input rows through the catalog.
 
+For path-based Delta input, `--delta_unmanaged` creates a unique database of
+catalog-managed shallow clones for each run. Queries use those persistent table
+objects, while the source Delta tables remain unchanged. The database and all
+clones are dropped when the run finishes or fails. Each run uses a dedicated SQL
+session, so changing its current database does not affect another run and caller
+temporary views remain untouched. The Spark catalog and its managed table storage
+must be writable.
+
+Runtime settings requested in `--property_file` are applied to the run's session.
+Startup-only settings must match the existing Spark application when reusing a
+session.
+
+Shallow clones require Delta Lake 2.3 or later. The bundled Spark 3.3 Delta
+templates use `io.delta:delta-core_2.12:2.3.0`; choose the corresponding Delta
+release when running another Spark version.
+
 `--analyze none|table|all_columns` controls statistics collection before the
 queries. `none` is equivalent to omitting the option. `table` collects row counts
 and table size; `all_columns` also runs `COMPUTE STATISTICS FOR ALL COLUMNS`.
@@ -395,8 +411,8 @@ optional arguments:
   --floats              When loading Text files like json and csv, schemas are required to determine if certain parts of the data are read as decimal type or not. If specified, float data will be used.
   --json_summary_folder JSON_SUMMARY_FOLDER
                         Empty folder/path (will create if not exist) to save JSON summary file for each query.
-  --delta_unmanaged     Use unmanaged tables for DeltaLake. This is useful for testing DeltaLake without leveraging a
-                        Metastore service
+  --delta_unmanaged     Read path-based Delta tables through run-scoped managed shallow clones. Requires a writable catalog
+                        and managed table storage; source tables are not modified.
   --hive                use table meta information in Hive metastore directly without registering temp views.
   --app_name APP_NAME   The name of the Spark application. If not specified, the default is "NDS - Power Run". Useful
                         for identifying runs in cluster UIs and logs. Automatic naming based on a single query (for
@@ -551,6 +567,14 @@ To run iceberg against different Spark versions, please modify the Iceberg packa
 The data maintenance queries are in [data_maintenance](./data_maintenance) folder. `DF_*.sql` are
 DELETE queries while `LF_*.sql` are INSERT queries.
 
+With Delta and `--delta_unmanaged`, maintenance operations target the same
+run-scoped managed shallow clones used by the power runner. The immutable source
+tables are not modified. Maintenance changes are visible only within the current
+`nds_maintenance.py` invocation: the clone database is dropped after success or
+failure, and later benchmark phases or runs start again from the immutable
+reference data. The run also uses a dedicated SQL session, leaving the caller's
+current database and temporary views unchanged.
+
 Note: The Delete functions in Data Maintenance cannot run successfully in Spark 3.2.0 and 3.2.1 due
 to a known Spark [issue](https://issues.apache.org/jira/browse/SPARK-39454). User can run it in Spark 3.2.2
 or later. More details including work-around for version 3.2.0 and 3.2.1 could be found in this
@@ -579,7 +603,7 @@ optional arguments:
                         Empty folder/path (will create if not exist) to save JSON summary file for each query.
   --warehouse_type {iceberg,delta}
                         Type of the warehouse used for Data Maintenance test.
-  --delta_unmanaged     Use unmanaged tables for DeltaLake. This is useful for testing DeltaLake without leveraging a Metastore service.
+  --delta_unmanaged     Run against run-scoped managed shallow clones of path-based Delta tables. Requires a writable catalog and managed table storage; source tables are not modified.
 ```
 
 An example command to run only _LF_CS_ and _DF_CS_ functions:

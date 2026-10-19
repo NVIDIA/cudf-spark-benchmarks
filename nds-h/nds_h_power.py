@@ -42,6 +42,7 @@ import subprocess
 
 from setup_utils import add_utils_to_sys_path
 add_utils_to_sys_path()
+from delta_clone import DeltaCloneScope, new_run_session
 from spark_utils import setQueryName, clearQueryName
 from profiler import Profiler
 from benchmark_statistics import (analyze_table, analyze_catalog, clear_statistics_summary,
@@ -176,19 +177,21 @@ def setup_tables(spark_session, input_prefix, input_format, execution_time_list,
 
 def register_delta_tables(spark_session, input_prefix, execution_time_list):
     spark_app_id = _get_app_id(spark_session)
-    # Register tables for Delta Lake
-    for table_name in get_schemas().keys():
-        start = int(time.time() * 1000)
-        # input_prefix must be absolute path: https://github.com/delta-io/delta/issues/555
-        register_sql = f"CREATE TABLE IF NOT EXISTS {table_name} USING DELTA LOCATION '{input_prefix}/{table_name}'"
-        print(register_sql)
-        spark_session.sql(register_sql)
-        end = int(time.time() * 1000)
-        print("====== Registering for table {} ======".format(table_name))
-        print("Time taken: {} millis for table {}".format(end - start, table_name))
-        execution_time_list.append(
-            (spark_app_id, "Register {}".format(table_name), end - start))
-    return execution_time_list
+    clone_scope = DeltaCloneScope(spark_session, "nds_h_delta_run")
+    try:
+        for table_name in get_schemas().keys():
+            start = int(time.time() * 1000)
+            source_path = "{}/{}".format(input_prefix.rstrip("/"), table_name)
+            clone_scope.clone_table(source_path, table_name)
+            end = int(time.time() * 1000)
+            print("====== Shallow cloning table {} ======".format(table_name))
+            print("Time taken: {} millis for table {}".format(end - start, table_name))
+            execution_time_list.append(
+                (spark_app_id, "ShallowClone {}".format(table_name), end - start))
+    except Exception:
+        clone_scope.close()
+        raise
+    return execution_time_list, clone_scope
 
 
 def ensure_valid_column_names(df: DataFrame):
@@ -297,7 +300,7 @@ def run_query_stream(input_prefix,
                      analyze_tables=False,
                      allow_failure=False, analyze=None):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
-    for easy accessibility. TempView Creation time is also recorded.
+    for easy accessibility. Table setup time is also recorded.
 
     Args:
         :param input_prefix : path of input data or warehouse if input_format is "iceberg" or hive_external=True.
@@ -339,66 +342,80 @@ def run_query_stream(input_prefix,
     session_builder = SparkSession.builder
     if spark_connect:
         session_builder = session_builder.remote(spark_connect)
+    spark_properties = {}
     if property_file:
         spark_properties = load_properties(property_file)
         for k, v in spark_properties.items():
             session_builder = session_builder.config(k, v)
-    spark_session = session_builder.appName(app_name).getOrCreate()
+    spark_session = session_builder.appName(
+        app_name).getOrCreate()
+    if input_format == 'delta':
+        # Keep this run's current database and temporary-view namespace isolated
+        # from other work sharing the same SparkContext.
+        spark_session = new_run_session(spark_session, spark_properties)
     spark_app_id = _get_app_id(spark_session)
-    if input_format != 'iceberg' and input_format != 'delta':
-        execution_time_list = setup_tables(spark_session, input_prefix, input_format,
-                                           execution_time_list,
-                                           analyze_tables, analyze)
-    elif input_format == 'delta':
-        execution_time_list = register_delta_tables(spark_session, input_prefix,
-                                                     execution_time_list)
+    delta_clone_scope = None
+    try:
+        if input_format != 'iceberg' and input_format != 'delta':
+            execution_time_list = setup_tables(spark_session, input_prefix, input_format,
+                                               execution_time_list,
+                                               analyze_tables, analyze)
+        elif input_format == 'delta':
+            execution_time_list, delta_clone_scope = register_delta_tables(
+                spark_session, input_prefix, execution_time_list)
 
-    check_json_summary_folder(json_summary_folder)
-    clear_statistics_summary(json_summary_folder)
-    if analyze is not None:
-        analyze_catalog(spark_session, analyze, get_schemas().keys(),
-                        json_summary_folder)
-    if sub_queries:
-        query_dict = get_query_subset(query_dict, sub_queries)
+        check_json_summary_folder(json_summary_folder)
+        clear_statistics_summary(json_summary_folder)
+        if analyze is not None:
+            analyze_catalog(spark_session, analyze, get_schemas().keys(),
+                            json_summary_folder)
+        if sub_queries:
+            query_dict = get_query_subset(query_dict, sub_queries)
 
-    # Setup profiler
-    profiler = Profiler(profiling_hook=profiling_hook, output_root=json_summary_folder)
+        # Setup profiler
+        profiler = Profiler(profiling_hook=profiling_hook, output_root=json_summary_folder)
 
-    power_start = int(time.time())
-    for query_name, q_content in query_dict.items():
-        # show query name in Spark web UI
-        setQueryName(spark_session, query_name)
-        print("====== Run {} ======".format(query_name))
-        q_report = PysparkBenchReport(spark_session, query_name)
-        with profiler(query_name=query_name):
-            summary = q_report.report_on(run_one_query,
-                                     warmup_iterations,
-                                     iterations,
-                                     spark_session,
-                                     q_content,
-                                     query_name,
-                                     output_path,
-                                     output_format,
-                                     save_plan_path,
-                                     plan_types,
-                                     skip_execution)
-        print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
-        query_times = summary['queryTimes']
-        execution_time_list.append((spark_app_id, query_name, query_times[0]))
-        queries_reports.append(q_report)
-        if json_summary_folder:
-            if property_file:
-                summary_prefix = os.path.join(
-                    json_summary_folder, os.path.basename(property_file)
-                )
-            else:
-                summary_prefix = os.path.join(json_summary_folder, '')
-            q_report.write_summary(prefix=summary_prefix)
-    clearQueryName(spark_session)
-    power_end = int(time.time())
-    power_elapse = int((power_end - power_start)*1000)
-    if not keep_sc:
-        spark_session.stop()
+        power_start = int(time.time())
+        for query_name, q_content in query_dict.items():
+            # show query name in Spark web UI
+            setQueryName(spark_session, query_name)
+            print("====== Run {} ======".format(query_name))
+            q_report = PysparkBenchReport(spark_session, query_name)
+            with profiler(query_name=query_name):
+                summary = q_report.report_on(run_one_query,
+                                             warmup_iterations,
+                                             iterations,
+                                             spark_session,
+                                             q_content,
+                                             query_name,
+                                             output_path,
+                                             output_format,
+                                             save_plan_path,
+                                             plan_types,
+                                             skip_execution)
+            print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
+            query_times = summary['queryTimes']
+            execution_time_list.append((spark_app_id, query_name, query_times[0]))
+            queries_reports.append(q_report)
+            if json_summary_folder:
+                if property_file:
+                    summary_prefix = os.path.join(
+                        json_summary_folder, os.path.basename(property_file)
+                    )
+                else:
+                    summary_prefix = os.path.join(json_summary_folder, '')
+                q_report.write_summary(prefix=summary_prefix)
+        clearQueryName(spark_session)
+        power_end = int(time.time())
+        power_elapse = int((power_end - power_start)*1000)
+    finally:
+        try:
+            if delta_clone_scope is not None:
+                delta_clone_scope.close()
+        finally:
+            if not keep_sc:
+                spark_session.stop()
+
     total_time_end = time.time()
     total_elapse = int((total_time_end - total_time_start) * 1000)
     print("====== Power Test Time: {} milliseconds ======".format(power_elapse))
@@ -468,6 +485,7 @@ if __name__ == "__main__":
                         default="")
     parser.add_argument('--input_format',
                         help='type for input data source, e.g. parquet, orc, json, csv or iceberg, delta. ' +
+                             'Delta paths are read through run-scoped managed shallow clones. ' +
                              'Certain types are not fully supported by GPU reading, please refer to ' +
                              'https://github.com/NVIDIA/cudf-spark/blob/main/docs/compatibility.md ' +
                              'for more details.',

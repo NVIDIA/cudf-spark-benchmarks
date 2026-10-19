@@ -123,7 +123,7 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                                 patch.object(driver, 'setup_tables',
                                              side_effect=lambda *args: args[4 if folder == 'nds' else 3]), \
                                 patch.object(driver, 'register_delta_tables',
-                                             side_effect=lambda *args: args[2]), \
+                                             side_effect=lambda *args: (args[2], Mock())), \
                                 patch.object(driver, 'analyze_catalog',
                                              side_effect=AssertionError('Analysis was disabled')), \
                                 patch.object(driver, 'Profiler', return_value=lambda **args: contextlib.nullcontext()), \
