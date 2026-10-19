@@ -210,6 +210,23 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_
     partition_columns = None
     has_dated_partition = False
 
+    def after_cutoff(value, directory):
+        if value == '__HIVE_DEFAULT_PARTITION__':
+            return False
+        try:
+            key = int(value)
+        except ValueError:
+            try:
+                partition_date = datetime.datetime.strptime(value, '%Y-%m-%d').date()
+            except ValueError:
+                raise ValueError("Invalid date partition at " + directory.toString())
+        else:
+            dates = get_date_keys()
+            if key not in dates:
+                raise ValueError("Partition date key missing from date_dim: " + value)
+            partition_date = dates[key]
+        return partition_date > cutoff_date
+
     def visit(directory, specification):
         nonlocal partition_columns, has_dated_partition
         entries = [entry for entry in filesystem.listStatus(directory)
@@ -224,7 +241,11 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_
                 column = unquote(column)
                 if not separator or not column or column in specification:
                     raise ValueError("Unexpected partition layout at " + entry.getPath().toString())
-                visit(entry.getPath(), {**specification, column: unquote(value)})
+                value = unquote(value)
+                # Skip excluded date branches before listing their files or deeper partitions.
+                if column == partition_column and after_cutoff(value, entry.getPath()):
+                    continue
+                visit(entry.getPath(), {**specification, column: value})
             return
         if not entries and not specification:
             return
@@ -237,22 +258,7 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_
             partition_columns = columns
         elif columns != partition_columns:
             raise ValueError("Inconsistent partition columns at " + directory.toString())
-        value = specification[partition_column]
-        if value != '__HIVE_DEFAULT_PARTITION__':
-            try:
-                key = int(value)
-            except ValueError:
-                try:
-                    partition_date = datetime.datetime.strptime(value, '%Y-%m-%d').date()
-                except ValueError:
-                    raise ValueError("Invalid date partition at " + directory.toString())
-            else:
-                dates = get_date_keys()
-                if key not in dates:
-                    raise ValueError("Partition date key missing from date_dim: " + value)
-                partition_date = dates[key]
-            if partition_date > cutoff_date:
-                return
+        if specification[partition_column] != '__HIVE_DEFAULT_PARTITION__':
             has_dated_partition = True
         partitions.append((specification, directory.toString()))
 

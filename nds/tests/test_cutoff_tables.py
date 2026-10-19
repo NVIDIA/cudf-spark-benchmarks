@@ -31,12 +31,20 @@ class FakePath:
         return self.path
 
 
-def partition_session(entries):
+def partition_session(entries, forbidden=()):
     filesystem = SimpleNamespace()
-    filesystem.listStatus = lambda path: [
-        SimpleNamespace(getPath=lambda name=name: FakePath('/facts/' + name, filesystem),
-                        isDirectory=lambda directory=directory: directory)
-        for name, directory in entries] if path.path == "/facts" else []
+    layout = entries if isinstance(entries, dict) else {'/facts': entries}
+
+    def list_status(path):
+        if path.path in forbidden:
+            raise AssertionError('Future date partition must not be traversed: ' + path.path)
+        return [
+            SimpleNamespace(
+                getPath=lambda name=name: FakePath(path.path + '/' + name, filesystem),
+                isDirectory=lambda directory=directory: directory)
+            for name, directory in layout.get(path.path, [])]
+
+    filesystem.listStatus = list_status
     return SimpleNamespace(
         _jvm=SimpleNamespace(org=SimpleNamespace(apache=SimpleNamespace(
             hadoop=SimpleNamespace(fs=SimpleNamespace(
@@ -104,6 +112,42 @@ class CutoffSelectionTest(unittest.TestCase):
             ({'order_date': '2001-01-02'}, '/facts/order_date=2001-01-02'),
             ({'order_date': '__HIVE_DEFAULT_PARTITION__'},
              '/facts/order_date=__HIVE_DEFAULT_PARTITION__')])
+
+    def test_future_date_directories_are_not_traversed(self):
+        null = '__HIVE_DEFAULT_PARTITION__'
+        for calendar in (False, True):
+            values = ['2001-01-01', '2001-01-02', '2001-01-03'] if calendar else ['1', '2', '3']
+            for position in ('only', 'first', 'second'):
+                with self.subTest(calendar=calendar, date_position=position):
+                    layout, forbidden, expected = {}, set(), []
+                    for value in [*values, null]:
+                        columns = [('day', value)]
+                        if position == 'first':
+                            columns.append(('region', 'west'))
+                        elif position == 'second':
+                            columns.insert(0, ('region', 'west'))
+                        path = '/facts'
+                        for column, partition_value in columns:
+                            name = column + '=' + partition_value
+                            children = layout.setdefault(path, [])
+                            if (name, True) not in children:
+                                children.append((name, True))
+                            path += '/' + name
+                            if column == 'day' and value == values[2]:
+                                forbidden.add(path)
+                        layout[path] = [('part.parquet', False)]
+                        if value != values[2]:
+                            expected.append((dict(columns), path))
+
+                    def date_keys():
+                        if calendar:
+                            raise AssertionError('Calendar dates do not require a date dimension')
+                        return {key: datetime.date(2001, 1, key) for key in (1, 2, 3)}
+
+                    selected = driver._partitions_at_cutoff(
+                        partition_session(layout, forbidden), '/facts', 'day', date_keys,
+                        datetime.date(2001, 1, 2))
+                    self.assertEqual(selected, sorted(expected, key=lambda partition: partition[1]))
 
     def test_rejects_invalid_layout_dates_and_null_only_selection(self):
         for entry, message in [
