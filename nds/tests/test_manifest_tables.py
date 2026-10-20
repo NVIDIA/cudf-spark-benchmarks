@@ -131,6 +131,20 @@ class ManifestTableTest(unittest.TestCase):
         self.assertEqual(nds_power._manifest_tables(self.spark, self.manifest.as_uri()),
                          nds_power._manifest_tables(self.spark, str(self.manifest)))
 
+    def test_decimal_date_dim_keys_resolve_selected_partitions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.spark.createDataFrame(
+                [(1, datetime.date(1998, 1, 1)), (2, datetime.date(1998, 1, 2)),
+                 (3, datetime.date(1998, 1, 3))], 'key int, d_date date') \
+                .selectExpr('CAST(key AS DECIMAL(10, 0)) AS d_date_sk', 'd_date') \
+                .write.parquet(str(Path(directory) / 'date_dim'))
+            dates = nds_power._date_key_mapping(self.spark, directory, 'parquet', False)
+            selected = nds_power._partitions_at_cutoff(
+                self.spark, str(self.root / 'orders'), 'order_day', lambda: dates,
+                datetime.date(1998, 1, 2), ['order_day'])
+            self.assertEqual({spec['order_day'] for spec, _ in selected},
+                             {'1', '2', '__HIVE_DEFAULT_PARTITION__'})
+
     def test_integer_cutoffs_require_date_dim_in_the_manifest(self):
         self.manifest.write_text(json.dumps({'tables': {'orders': self.tables['orders']}}))
         try:

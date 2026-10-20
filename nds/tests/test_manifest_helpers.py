@@ -5,6 +5,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -78,7 +79,8 @@ class ManifestHelpersTest(unittest.TestCase):
     def test_manifest_validates_names_fields_and_ordered_partition_metadata(self):
         invalid = [
             ({'': {}}, 'table names'), ({'..': {}}, 'table names'),
-            ({'my-table': {}}, 'table names'), ({'Foo': {}, 'foo': {}}, 'Duplicate manifest'),
+            ({'my-table': {}}, 'table names'), ({'123': {}}, 'table names'),
+            ({'Foo': {}, 'foo': {}}, 'Duplicate manifest'),
             ({'orders': {'date_partition_columns': 'day'}}, 'Unknown manifest table fields'),
             ({'orders': {'partition_columns': 'day'}}, 'list of nonempty strings'),
             ({'orders': {'partition_columns': None}}, 'list of nonempty strings'),
@@ -94,19 +96,28 @@ class ManifestHelpersTest(unittest.TestCase):
                 with self.subTest(tables=tables), self.assertRaisesRegex(ValueError, error):
                     driver._manifest_tables(None, str(path))
             valid = {'Foo': {'partition_columns': ['region', 'day'], 'date_partition_column': 'day'},
-                     'foo': {'partition_columns': []}}
+                     'other': {'partition_columns': []}}
             path.write_text(json.dumps({'tables': valid, 'parameters': {'seed': 7}}))
             session = SimpleNamespace(conf=SimpleNamespace(get=lambda *args: 'true'))
             self.assertEqual(driver._manifest_tables(session, str(path)), valid)
+            for tables in ({'Foo': {}, 'foo': {}},
+                           {'orders': {'partition_columns': ['day', 'DAY']}}):
+                path.write_text(json.dumps({'tables': tables}))
+                with self.subTest(case_sensitive=True, tables=tables):
+                    with self.assertRaisesRegex(ValueError, 'Duplicate'):
+                        driver._manifest_tables(session, str(path))
 
     def test_colon_filename_is_local_and_single_slash_file_uri_remains_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'workload:v2.json'
             path.write_text(json.dumps({'tables': {'orders': {}}}))
             # Use the relative spelling that urlparse would otherwise treat as a scheme.
-            with patch.object(driver.os.path, 'isfile', return_value=True), \
-                    patch('builtins.open', return_value=path.open()):
+            previous = os.getcwd()
+            try:
+                os.chdir(directory)
                 self.assertEqual(driver._manifest_tables(None, 'workload:v2.json'), {'orders': {}})
+            finally:
+                os.chdir(previous)
             session, _ = self.session(json.dumps({'tables': {'orders': {}}}))
             self.assertEqual(driver._manifest_tables(session, 'file:/metadata/custom.json'),
                              {'orders': {}})
@@ -118,9 +129,10 @@ class ManifestHelpersTest(unittest.TestCase):
                          {name: [column] for name, column in driver.DATE_PARTITION_COLUMNS.items()})
 
     def test_explicit_manifest_requires_classic_file_backed_parquet(self):
-        for options in ({'hive_external': True}, {'spark_connect': 'sc://localhost'}):
+        for options, message in (({'hive_external': True}, 'external Hive tables'),
+                                 ({'spark_connect': 'sc://localhost'}, 'Spark Connect')):
             with self.subTest(options=options):
-                with self.assertRaisesRegex(ValueError, '--dataset_manifest requires'):
+                with self.assertRaisesRegex(ValueError, message):
                     driver.run_query_stream('/data', None, {}, '/tmp/times.csv',
                                             None, None, None, 0, 1, None,
                                             dataset_manifest='/custom.json', **options)

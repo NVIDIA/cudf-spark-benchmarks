@@ -85,7 +85,7 @@ class ManifestPartitionLayoutTest(unittest.TestCase):
                         'partition_columns': ['region', 'event_day']}})
         for mode in (None, 'table'):
             with self.subTest(analyze=mode), self.assertRaisesRegex(
-                    ValueError, 'does not match the data file layout'):
+                    ValueError, 'Unexpected partition directory layout'):
                 with contextlib.redirect_stdout(io.StringIO()):
                     nds_power.setup_tables(
                         self.spark, str(self.root), 'parquet', False, [],

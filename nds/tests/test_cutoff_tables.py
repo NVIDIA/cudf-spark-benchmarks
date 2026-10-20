@@ -4,6 +4,7 @@
 
 import argparse
 import datetime
+from decimal import Decimal
 from pathlib import Path
 import contextlib
 import io
@@ -221,6 +222,9 @@ class CutoffSelectionTest(unittest.TestCase):
                 [SimpleNamespace(d_date_sk=1, d_date=None)],
                 [SimpleNamespace(d_date_sk='1', d_date=datetime.date(2001, 1, 1))],
                 [SimpleNamespace(d_date_sk=True, d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=Decimal('1.5'), d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=Decimal('NaN'), d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=Decimal('Infinity'), d_date=datetime.date(2001, 1, 1))],
                 [SimpleNamespace(d_date_sk=1, d_date=datetime.datetime(2001, 1, 1))],
                 [SimpleNamespace(d_date_sk=1, d_date='2001-01-01'),
                  SimpleNamespace(d_date_sk=1, d_date='2001-01-02')]]:
@@ -229,6 +233,15 @@ class CutoffSelectionTest(unittest.TestCase):
             session = SimpleNamespace(read=SimpleNamespace(format=lambda fmt: reader))
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 driver._date_key_mapping(session, '/data', 'parquet', False)
+
+    def test_integral_decimal_date_keys_retain_integer_lookup_semantics(self):
+        rows = [SimpleNamespace(d_date_sk=Decimal('1'), d_date=datetime.date(2001, 1, 1)),
+                SimpleNamespace(d_date_sk=Decimal('2.00'), d_date='2001-01-02')]
+        selected = SimpleNamespace(collect=lambda: rows)
+        reader = SimpleNamespace(load=lambda path: SimpleNamespace(select=lambda *cols: selected))
+        session = SimpleNamespace(read=SimpleNamespace(format=lambda fmt: reader))
+        self.assertEqual(driver._date_key_mapping(session, '/data', 'parquet', False),
+                         {1: datetime.date(2001, 1, 1), 2: datetime.date(2001, 1, 2)})
 
     def test_unsupported_inputs_require_classic_spark_before_construction(self):
         for options in ({'input_format': 'iceberg'}, {'input_format': 'delta'},

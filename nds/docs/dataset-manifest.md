@@ -50,9 +50,9 @@ For this layout, save the following as `metadata/workload.json`:
 ```
 
 The `tables` object must be nonempty. Each table name must contain only ASCII
-letters, digits or underscores, matching Spark's catalog table-name rules. Names
-must be distinct under Spark's configured case sensitivity: `Foo` and `foo`
-conflict by default, but are distinct with `spark.sql.caseSensitive=true`.
+letters, digits or underscores, with at least one letter or underscore. Names
+must be distinct ignoring case: `Foo` and `foo` conflict even when
+`spark.sql.caseSensitive=true`, because Hive catalogs store lowercase table names.
 Only listed tables are registered.
 
 Each table entry is an object accepting `date_partition_column` and the optional
@@ -64,8 +64,9 @@ Omitting `date_partition_column` or setting it to `null` means no cutoff filteri
 for that table. Spark infers column schemas from the Parquet files. For cutoff
 loading, `partition_columns` can list every directory partition column in physical
 order. A non-null `date_partition_column` must appear in this list when the list
-is supplied. Without it, the driver discovers the partition layout from the
-directories.
+is supplied. Column names must match the directory names exactly, including case;
+duplicate column names are rejected ignoring case. Without the list, the driver
+discovers the partition layout from the directories.
 
 An unqualified path such as `/path/to/workload.json` or `metadata/workload.json`
 is a driver-local file, regardless of Spark's default filesystem. An existing
@@ -128,8 +129,8 @@ multiple columns. The driver recognizes these partition values:
   with the cutoff. This layout needs no `date_dim` table.
 - Integer date keys, such as `order_day=123`, are resolved using `date_dim`.
   For this layout the manifest must list `date_dim`, containing `d_date_sk`
-  and `d_date`. `d_date_sk` must have an integral Spark type; string keys are
-  not supported. Each key maps to a calendar date in `d_date`, which must have
+  and `d_date`. `d_date_sk` must have an integral Spark type or contain integral
+  decimal values; string keys are not supported. Each key maps to a calendar date in `d_date`, which must have
   Spark DATE or STRING type containing `YYYY-MM-DD` values. TIMESTAMP values
   are not supported and produce an error rather than being truncated to dates.
   Keys and dates must be non-null, and a key must not map to conflicting dates.
@@ -139,7 +140,9 @@ NULL-date partitions. NULL partitions have no known date; retaining them does
 not imply they are earlier than the cutoff. Every filtered table must have at
 least one dated partition selected. Tables without a date-partition column,
 including `date_dim` itself, remain complete. Analysis uses only the selected
-partitions.
+partitions. For catalog analysis, partition values containing quotes or backslashes
+require `spark.sql.legacy.keepPartitionSpecAsStringLiteral=false` (Spark's default).
+An incompatible setting is rejected before the table is created.
 
 For example, both `purchases/region=west/purchase_date=2001-07-01/` and
 `purchases/purchase_date=2001-07-01/region=west/` work with
