@@ -1,5 +1,5 @@
 #
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,7 +32,8 @@ load_test:
   skip: false
 generate_query_stream:
   # how many streams to be generated including the stream for Power Test
-  # If there're 4 streams in one Throughput test, num_streams = 4*2+1 according to Spec 4.3.2
+  # Sq must be even and >= 4. According to Spec 4.3.2,
+  # num_streams = Sq * 2 + 1.
   num_streams: 9
   # template dir contains all query templates to generate Spark compatible queries
   # yaml doesn't support resolving environment variable, please use absolute path

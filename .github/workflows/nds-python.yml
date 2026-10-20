@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: NDS Python checks
+
+on:
+  pull_request:
+    paths:
+      - "nds/nds_bench.py"
+      - "nds/test_nds_bench.py"
+      - ".github/workflows/nds-python.yml"
+  push:
+    branches: [dev]
+    paths:
+      - "nds/nds_bench.py"
+      - "nds/test_nds_bench.py"
+      - ".github/workflows/nds-python.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: python -m pip install PyYAML
+      - name: Compile
+        run: python -m py_compile nds/nds_bench.py nds/test_nds_bench.py
+      - name: Unit tests
+        run: PYTHONPATH=nds python -m unittest -v nds/test_nds_bench.py
