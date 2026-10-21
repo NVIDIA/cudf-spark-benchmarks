@@ -317,10 +317,17 @@ _After_ user generates query streams, Power Run can be executed using one of the
 map to dates on or before the cutoff in `date_dim`. NULL-date partitions are always
 included, regardless of the cutoff. Dimension tables are read in full. The facts must use the partition layout listed above;
 unknown date keys and unexpected layouts are rejected. Preparation time for reading
-`date_dim` and selecting fact partitions is recorded separately as
+`date_dim`, selecting fact partitions, and loading and validating their file
+metadata is recorded separately as
 `Power Cutoff Setup Time` in milliseconds. Each fact table must
 have at least one dated partition at or before the cutoff, even when it has a
 NULL-date partition.
+
+Empty stray folders beneath partition leaves are allowed. Data files must be
+stored directly in the partition leaf directories: Spark may load files in
+ordinary nested folders through temporary views but omit them from analyzed
+catalog tables. The driver does not add directory listings to detect this
+unsupported layout.
 
 The driver cutoff only restricts data; it does not change query text or date
 literals. Direct callers must supply queries whose date windows fit the loaded
@@ -379,8 +386,7 @@ Arguments supported by `nds_power.py`:
 
 ```text
 usage: nds_power.py [-h]
-                    [--input_format {parquet,orc,avro,csv,json,iceberg,delta} |
-                    --dataset_manifest DATASET_MANIFEST]
+                    [--input_format {parquet,orc,avro,csv,json,iceberg,delta} | --dataset_manifest DATASET_MANIFEST]
                     [--cutoff_date CUTOFF_DATE]
                     [--analyze {none,table,all_columns} | --analyze_tables]
                     [--output_prefix OUTPUT_PREFIX]
@@ -395,8 +401,7 @@ usage: nds_power.py [-h]
                     [--save_plan_path SAVE_PLAN_PATH]
                     [--plan_types PLAN_TYPES] [--spark_connect SPARK_CONNECT]
                     [--skip_execution] [--app_name APP_NAME]
-                    [--sub_queries SUB_QUERIES |
-                    --sub_query_patterns SUB_QUERY_PATTERNS]
+                    [--sub_queries SUB_QUERIES | --sub_query_patterns SUB_QUERY_PATTERNS]
                     input_prefix query_stream_file time_log
 
 positional arguments:

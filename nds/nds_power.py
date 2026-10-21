@@ -31,6 +31,7 @@
 #
 
 import argparse
+from contextlib import contextmanager
 import csv
 import json
 import datetime
@@ -53,7 +54,7 @@ add_utils_to_sys_path()
 from spark_utils import setQueryName, clearQueryName
 from profiler import Profiler
 from benchmark_statistics import (analyze_table, analyze_catalog, clear_statistics_summary,
-                                  require_fresh_catalog_tables)
+                                  require_fresh_catalog_tables, catalog_table_exists)
 
 check_version()
 
@@ -95,22 +96,41 @@ def _schema_to_ddl(schema):
 def _require_fresh_catalog_table(spark_session, table_name):
     qualified = "{}.{}".format(_quote_identifier(spark_session.catalog.currentDatabase()),
                               _quote_identifier(table_name))
-    if spark_session.catalog.tableExists(qualified):
+    if catalog_table_exists(spark_session, qualified):
         raise ValueError("Cutoff loading requires a fresh catalog table: " + table_name)
+
+
+def _require_partition_catalog_settings(spark_session, partitions):
+    if not partitions:
+        return
+    if spark_session.conf.get(
+            'spark.sql.hive.manageFilesourcePartitions', 'true').strip().lower() == 'false':
+        raise ValueError('Cutoff catalog tables require spark.sql.hive.manageFilesourcePartitions=true')
+    if spark_session.conf.get(
+            'spark.sql.legacy.keepPartitionSpecAsStringLiteral', 'false').strip().lower() == 'true':
+        for table_name, selected in partitions.items():
+            if any("'" in value or "\\" in value
+                   for specification, _ in selected for value in specification.values()):
+                raise ValueError(
+                    'Cutoff catalog partitions containing quotes or backslashes require '
+                    'spark.sql.legacy.keepPartitionSpecAsStringLiteral=false: ' + table_name)
+
+
+@contextmanager
+def _without_sql_variable_substitution(spark_session):
+    key = 'spark.sql.variable.substitute'
+    previous = spark_session.conf.get(key, 'true')
+    spark_session.conf.set(key, 'false')
+    try:
+        yield
+    finally:
+        spark_session.conf.set(key, previous)
 
 
 def _create_data_source_table(spark_session, table_name, table_path, input_format, schema=None,
                               partitions=None):
     if partitions is not None:
-        if (spark_session.conf.get(
-                'spark.sql.legacy.keepPartitionSpecAsStringLiteral', 'false').lower() == 'true'
-                and any("'" in value or "\\" in value
-                        for specification, _ in partitions for value in specification.values())):
-            raise ValueError(
-                'Cutoff catalog partitions containing quotes or backslashes require '
-                'spark.sql.legacy.keepPartitionSpecAsStringLiteral=false')
-        if spark_session.conf.get('spark.sql.hive.manageFilesourcePartitions', 'true').lower() == 'false':
-            raise ValueError('Cutoff catalog tables require spark.sql.hive.manageFilesourcePartitions=true')
+        _require_partition_catalog_settings(spark_session, {table_name: partitions})
         _require_fresh_catalog_table(spark_session, table_name)
     table_identifier = _quote_identifier(table_name)
     schema_clause = " ({})".format(_schema_to_ddl(schema)) if schema else ""
@@ -124,21 +144,22 @@ def _create_data_source_table(spark_session, table_name, table_path, input_forma
         partition_clause,
         _quote_sql_string(table_path))
     print(create_sql)
-    spark_session.catalog.dropTempView(table_name)
-    spark_session.sql(create_sql)
-    if partitions is not None:
-        clauses = [
-            "PARTITION ({}) LOCATION {}".format(
-                ", ".join("{}={}".format(_quote_identifier(column), _quote_partition_value(value))
-                          for column, value in specification.items()),
-                _quote_sql_string(path))
-            for specification, path in partitions
-        ]
-        if clauses:
-            spark_session.sql("ALTER TABLE {} ADD IF NOT EXISTS {}".format(
-                table_identifier, " ".join(clauses)))
-    elif any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
-        spark_session.catalog.recoverPartitions(table_name)
+    with _without_sql_variable_substitution(spark_session):
+        spark_session.catalog.dropTempView(table_name)
+        spark_session.sql(create_sql)
+        if partitions is not None:
+            clauses = [
+                "PARTITION ({}) LOCATION {}".format(
+                    ", ".join("{}={}".format(_quote_identifier(column), _quote_partition_value(value))
+                              for column, value in specification.items()),
+                    _quote_sql_string(path))
+                for specification, path in partitions
+            ]
+            if clauses:
+                spark_session.sql("ALTER TABLE {} ADD IF NOT EXISTS {}".format(
+                    table_identifier, " ".join(clauses)))
+        elif any(column.isPartition for column in spark_session.catalog.listColumns(table_name)):
+            spark_session.catalog.recoverPartitions(table_name)
 
 
 DATE_PARTITION_COLUMNS = {
@@ -173,9 +194,9 @@ def _manifest_tables(spark_session, manifest_path):
         raise ValueError('A benchmark manifest must contain a nonempty tables object')
     names = set()
     for name, table in tables.items():
-        if not re.fullmatch(r'[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*', name):
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
             raise ValueError('Manifest table names must contain only letters, numbers and _, '
-                             'including at least one letter or _: ' +
+                             'starting with a letter or _: ' +
                              repr(name))
         resolved_name = name.lower()
         if resolved_name in names:
@@ -310,6 +331,12 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_
             return
         directories = [entry for entry in entries if entry.isDirectory()]
         if directories:
+            if (partition_column in specification and
+                    all('=' not in entry.getPath().getName() for entry in directories)):
+                # Ordinary folders below a partition leaf are left to Spark's
+                # file discovery, just as with a declared partition layout.
+                remember(directory, specification)
+                return
             if len(directories) != len(entries):
                 raise ValueError("Unexpected partition layout at " + directory.toString())
             for entry in directories:
@@ -341,7 +368,7 @@ def _partitions_at_cutoff(spark_session, table_path, partition_column, get_date_
 
 
 
-def _require_partition_files(frame, partition_columns, date_column):
+def _require_partition_files(spark_session, frame, partition_columns, date_column, table_path):
     # Read Spark's cached partition metadata in the JVM instead of transferring
     # every input file path to Python. File-backed V1 and V2 reads expose the
     # same file index through their respective logical relations.
@@ -352,16 +379,16 @@ def _require_partition_files(frame, partition_columns, date_column):
         file_index = plan.relation().location()
     actual_columns = list(file_index.partitionSchema().fieldNames())
     if actual_columns != partition_columns:
-        raise ValueError('Unexpected partition directory layout: expected {}, found {}'.format(
-            partition_columns, actual_columns))
+        raise ValueError('Unexpected partition directory layout at {}: expected {}, found {}'.format(
+            table_path, partition_columns, actual_columns))
     # Empty dated directories must not make NULL-only data pass validation.
     # Prune the cached file index with a resolved partition predicate; this
     # neither reads data rows nor transfers the file list to Python.
     predicate = frame.filter(_quote_identifier(date_column) + ' IS NOT NULL') \
         ._jdf.queryExecution().analyzed().condition()
-    to_seq = frame.sparkSession._jvm.PythonUtils.toSeq
+    to_seq = spark_session._jvm.PythonUtils.toSeq
     if not file_index.listFiles(to_seq([predicate]), to_seq([])).nonEmpty():
-        raise ValueError('No dated data files at or before the cutoff')
+        raise ValueError('No dated data files at or before the cutoff in ' + table_path)
 
 def split_and_strip(str, delimiter):
     return [s.strip() for s in str.split(delimiter) if s.strip()]
@@ -540,6 +567,7 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
         require_fresh_catalog_tables(spark_session, tables)
     spark_app_id = _get_app_id(spark_session)
     partitions = {}
+    selected_frames = {}
     if cutoff_date is not None:
         start = int(time.time() * 1000)
         if analyze_tables:
@@ -566,6 +594,20 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
                 partitions[table_name] = _partitions_at_cutoff(
                     spark_session, table['path'], column, get_date_keys, cutoff_date,
                     table.get('partition_columns'))
+        if statistics_requested:
+            _require_partition_catalog_settings(spark_session, partitions)
+        for table_name, selected in partitions.items():
+            table = tables[table_name]
+            reader = spark_session.read.format(table['format'])
+            if table['schema'] is not None:
+                reader = reader.schema(table['schema'])
+            frame = reader.option('basePath', table['path']).load([path for _, path in selected])
+            columns = table.get('partition_columns')
+            if columns is None:
+                columns = list(selected[0][0])
+            _require_partition_files(spark_session, frame, columns,
+                                     table['date_partition_column'], table['path'])
+            selected_frames[table_name] = frame
         cutoff_setup_time = int(time.time() * 1000) - start
         print("====== Power Cutoff Setup Time: {} milliseconds ======".format(cutoff_setup_time))
         execution_time_list.append((spark_app_id, "Power Cutoff Setup Time", cutoff_setup_time))
@@ -579,11 +621,7 @@ def setup_tables(spark_session, input_prefix, input_format, use_decimal, executi
             reader = reader.schema(schema)
         if table_name in partitions:
             selected = partitions[table_name]
-            selected_frame = reader.option('basePath', table_path).load(
-                [path for _, path in selected])
-            if table.get('partition_columns') is not None:
-                _require_partition_files(selected_frame, table['partition_columns'],
-                                         table['date_partition_column'])
+            selected_frame = selected_frames[table_name]
             if statistics_requested:
                 _create_data_source_table(
                     spark_session, table_name, table_path, table['format'], selected_frame.schema,

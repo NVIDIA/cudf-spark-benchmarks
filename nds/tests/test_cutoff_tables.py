@@ -57,7 +57,34 @@ def partition_session(entries, forbidden=()):
 
 
 class CutoffSelectionTest(unittest.TestCase):
-    def test_cutoff_setup_time_covers_mapping_and_partition_selection_only_when_requested(self):
+    def test_incompatible_catalog_settings_fail_before_creating_any_table(self):
+        for key, value in (
+                ('spark.sql.legacy.keepPartitionSpecAsStringLiteral', ' true '),
+                ('spark.sql.hive.manageFilesourcePartitions', ' false ')):
+            for mode in ('table', 'all_columns', 'legacy'):
+                with self.subTest(key=key, mode=mode):
+                    session = Mock()
+                    session.conf.get.side_effect = lambda name, default=None: (
+                        value if name == key else default or 'application-test')
+                    session.catalog.tableExists.return_value = False
+                    session.catalog.currentDatabase.return_value = 'default'
+                    tables = driver._dataset_tables('/data', 'parquet', False, {
+                        'plain': {}, 'safe': {'date_partition_column': 'day'},
+                        'special': {'date_partition_column': 'day'}})
+                    selected = [[({'day': '2001-01-01', 'region': 'north'}, '/safe')],
+                                [({'day': '2001-01-01', 'region': "o'neil"}, '/special')]]
+                    with patch.object(driver, '_partitions_at_cutoff', side_effect=selected), \
+                            patch.object(driver, '_create_data_source_table') as create:
+                        with self.assertRaisesRegex(ValueError, key.replace('.', r'\.')):
+                            driver.setup_tables(
+                                session, '/data', 'parquet', False, [],
+                                cutoff_date=datetime.date(2001, 1, 1), tables=tables,
+                                analyze=None if mode == 'legacy' else mode,
+                                analyze_tables=mode == 'legacy')
+                        create.assert_not_called()
+                        session.read.format.assert_not_called()
+
+    def test_cutoff_setup_time_includes_selected_frame_loading_and_validation(self):
         for analyze in (False, True):
             for cutoff in (None, datetime.date(2001, 1, 2)):
                 with self.subTest(analyze=analyze, cutoff=cutoff):
@@ -76,17 +103,27 @@ class CutoffSelectionTest(unittest.TestCase):
                         clock[0] += 0.250
                         return [('1', '/facts/date=1')]
 
+                    def load_frame(*args):
+                        clock[0] += 0.250
+                        return Mock()
+
+                    def validate_frame(*args):
+                        clock[0] += 0.500
+
+                    session.read.format.return_value.option.return_value.load.side_effect = load_frame
                     with patch.object(driver.time, 'time', side_effect=lambda: clock[0]), \
                             patch.object(driver, '_date_key_mapping', side_effect=map_dates), \
                             patch.object(driver, '_partitions_at_cutoff', side_effect=select_partitions), \
                             patch.object(driver, '_create_data_source_table'), \
-                            patch.object(driver, '_require_partition_files'), \
+                            patch.object(driver, '_require_partition_files', side_effect=validate_frame), \
                             contextlib.redirect_stdout(io.StringIO()):
                         timings = driver.setup_tables(session, '/facts', 'parquet', False, [],
                                                       analyze_tables=analyze, cutoff_date=cutoff)
                     preparation = [row for row in timings if row[1] == 'Power Cutoff Setup Time']
                     self.assertEqual(preparation, [] if cutoff is None else
-                                     [('application-test', 'Power Cutoff Setup Time', 1875)])
+                                     [('application-test', 'Power Cutoff Setup Time', 7125)])
+                    self.assertTrue(all(row[2] == 0 for row in timings
+                                        if row[1].startswith('Create')))
 
     def test_selects_cutoff_inclusively_and_keeps_null_partitions(self):
         entries = [('ss_sold_date_sk=3', True), ('_SUCCESS', False),

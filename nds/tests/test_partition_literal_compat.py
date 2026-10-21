@@ -35,17 +35,20 @@ class PartitionLiteralCompatibilityTest(unittest.TestCase):
 
     def test_integer_date_and_string_partitions_work_with_legacy_literal_settings(self):
         day = datetime.date(2001, 1, 1)
-        expected = {(1, 20, day, 'north'), (2, None, None, None)}
-        path = self.root / 'ordinary'
+        expected = {(1, 20, day, 'north'), (2, None, None, None),
+                    (3, 20, day, '${spark.app.name}'),
+                    (4, 20, day, '${hivevar:pr295_missing}')}
+        path = self.root / 'ordinary_${spark.app.name}_${hivevar:pr295_missing}'
         frame = self.spark.createDataFrame(
             list(expected), 'payload int, date_key int, event_day date, region string')
         frame.coalesce(1).write.partitionBy('date_key', 'event_day', 'region').parquet(str(path))
         selected = driver._partitions_at_cutoff(
             self.spark, str(path), 'date_key', lambda: {20: day}, day)
         keys = ('spark.sql.legacy.keepPartitionSpecAsStringLiteral',
-                'spark.sql.parser.escapedStringLiterals')
+                'spark.sql.parser.escapedStringLiterals', 'spark.sql.variable.substitute')
         previous = [self.spark.conf.get(key) for key in keys]
         try:
+            self.spark.conf.set(keys[2], 'true')
             for keep in ('false', 'true'):
                 for escaped in ('false', 'true'):
                     with self.subTest(keepPartitionSpecAsStringLiteral=keep,
@@ -56,6 +59,7 @@ class PartitionLiteralCompatibilityTest(unittest.TestCase):
                             self.spark, 'ordinary_values', str(path), 'parquet',
                             frame.schema, selected)
                         try:
+                            self.assertEqual(self.spark.conf.get(keys[2]), 'true')
                             self.spark.sql('ANALYZE TABLE ordinary_values COMPUTE STATISTICS')
                             self.assertEqual(
                                 {tuple(row) for row in self.spark.table('ordinary_values').collect()},

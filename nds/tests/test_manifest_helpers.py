@@ -19,6 +19,23 @@ import nds_power as driver
 
 
 class ManifestHelpersTest(unittest.TestCase):
+    def test_registration_restores_variable_substitution_after_success_or_failure(self):
+        for setting in ('true', 'false'):
+            for fail in (False, True):
+                with self.subTest(setting=setting, fail=fail):
+                    session = Mock()
+                    session.conf.get.return_value = setting
+                    session.catalog.listColumns.return_value = []
+                    if fail:
+                        session.sql.side_effect = RuntimeError('registration failed')
+                        with self.assertRaisesRegex(RuntimeError, 'registration failed'):
+                            driver._create_data_source_table(session, 'orders', '/orders', 'parquet')
+                    else:
+                        driver._create_data_source_table(session, 'orders', '/orders', 'parquet')
+                    self.assertEqual(session.conf.set.call_args_list,
+                                     [unittest.mock.call('spark.sql.variable.substitute', 'false'),
+                                      unittest.mock.call('spark.sql.variable.substitute', setting)])
+
     def session(self, content, exists=True):
         session = Mock()
         filesystem = session._jvm.org.apache.hadoop.fs.Path.return_value.getFileSystem.return_value
@@ -80,6 +97,8 @@ class ManifestHelpersTest(unittest.TestCase):
         invalid = [
             ({'': {}}, 'table names'), ({'..': {}}, 'table names'),
             ({'my-table': {}}, 'table names'), ({'123': {}}, 'table names'),
+            ({'1e5': {}}, 'table names'), ({'1L': {}}, 'table names'),
+            ({'1d': {}}, 'table names'), ({'1table': {}}, 'table names'),
             ({'Foo': {}, 'foo': {}}, 'Duplicate manifest'),
             ({'orders': {'date_partition_columns': 'day'}}, 'Unknown manifest table fields'),
             ({'orders': {'partition_columns': 'day'}}, 'list of nonempty strings'),
@@ -96,7 +115,7 @@ class ManifestHelpersTest(unittest.TestCase):
                 with self.subTest(tables=tables), self.assertRaisesRegex(ValueError, error):
                     driver._manifest_tables(None, str(path))
             valid = {'Foo': {'partition_columns': ['region', 'day'], 'date_partition_column': 'day'},
-                     'other': {'partition_columns': []}}
+                     '_other123': {'partition_columns': []}}
             path.write_text(json.dumps({'tables': valid, 'parameters': {'seed': 7}}))
             session = SimpleNamespace(conf=SimpleNamespace(get=lambda *args: 'true'))
             self.assertEqual(driver._manifest_tables(session, str(path)), valid)

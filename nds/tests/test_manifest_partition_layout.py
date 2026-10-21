@@ -91,6 +91,75 @@ class ManifestPartitionLayoutTest(unittest.TestCase):
                         self.spark, str(self.root), 'parquet', False, [],
                         cutoff_date=datetime.date(2001, 1, 2), analyze=mode, tables=tables)
 
+    def test_empty_stray_folders_beneath_partition_leaves_do_not_change_selected_rows(self):
+        day = datetime.date(2001, 1, 1)
+        expected = {(1, day), (3, None)}
+        path = self.root / 'nested_events'
+        self.spark.createDataFrame(
+            [(1, day), (2, datetime.date(2001, 1, 3)), (3, None)], 'payload int, day date') \
+            .coalesce(1).write.partitionBy('day').parquet(str(path))
+        for partition in path.glob('day=*'):
+            (partition / 'extra' / 'deeper').mkdir(parents=True)
+        original = self.spark.conf.get('spark.sql.sources.useV1SourceList')
+        try:
+            for sources in ('parquet', ''):
+                self.spark.conf.set('spark.sql.sources.useV1SourceList', sources)
+                for declared in (False, True):
+                    for analyze in (None, 'table'):
+                        with self.subTest(sources=sources, declared=declared, analyze=analyze):
+                            metadata = {'date_partition_column': 'day'}
+                            if declared:
+                                metadata['partition_columns'] = ['day']
+                            tables = nds_power._dataset_tables(
+                                str(self.root), 'parquet', False, {'nested_events': metadata})
+                            try:
+                                with contextlib.redirect_stdout(io.StringIO()):
+                                    nds_power.setup_tables(
+                                        self.spark, str(self.root), 'parquet', False, [],
+                                        cutoff_date=day, analyze=analyze, tables=tables)
+                                    if analyze:
+                                        nds_power.analyze_catalog(self.spark, analyze, tables, None)
+                                self.assertEqual(
+                                    {tuple(row) for row in self.spark.table('nested_events').collect()},
+                                    expected)
+                            finally:
+                                self.spark.catalog.dropTempView('nested_events')
+                                self.spark.sql('DROP TABLE IF EXISTS nested_events')
+        finally:
+            self.spark.conf.set('spark.sql.sources.useV1SourceList', original)
+
+    def test_empty_nested_dated_directory_does_not_make_null_only_data_valid(self):
+        path = self.root / 'null_only_nested'
+        self.spark.createDataFrame([(1, None)], 'payload int, day date').coalesce(1) \
+            .write.partitionBy('day').parquet(str(path))
+        (path / 'day=2001-01-01' / 'extra' / 'deeper').mkdir(parents=True)
+        original = self.spark.conf.get('spark.sql.sources.useV1SourceList')
+        try:
+            for sources in ('parquet', ''):
+                self.spark.conf.set('spark.sql.sources.useV1SourceList', sources)
+                for declared in (False, True):
+                    for analyze in (None, 'table'):
+                        with self.subTest(sources=sources, declared=declared, analyze=analyze):
+                            metadata = {'date_partition_column': 'day'}
+                            if declared:
+                                metadata['partition_columns'] = ['day']
+                            tables = nds_power._dataset_tables(
+                                str(self.root), 'parquet', False, {'null_only_nested': metadata})
+                            try:
+                                with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                                        ValueError, 'No dated data files.*null_only_nested'):
+                                    nds_power.setup_tables(
+                                        self.spark, str(self.root), 'parquet', False, [],
+                                        cutoff_date=datetime.date(2001, 1, 1), analyze=analyze,
+                                        tables=tables)
+                                self.assertFalse(nds_power.catalog_table_exists(
+                                    self.spark, 'null_only_nested'))
+                            finally:
+                                self.spark.catalog.dropTempView('null_only_nested')
+                                self.spark.sql('DROP TABLE IF EXISTS null_only_nested')
+        finally:
+            self.spark.conf.set('spark.sql.sources.useV1SourceList', original)
+
 
 if __name__ == '__main__':
     unittest.main()

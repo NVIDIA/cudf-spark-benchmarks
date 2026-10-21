@@ -42,11 +42,14 @@ class PartitionMetadataTest(unittest.TestCase):
                 with self.subTest(sources=sources):
                     self.spark.conf.set('spark.sql.sources.useV1SourceList', sources)
                     frame = self.spark.read.parquet(str(path))
-                    nds_power._require_partition_files(frame, ['day', 'region'], 'day')
+                    nds_power._require_partition_files(
+                        self.spark, frame, ['day', 'region'], 'day', str(path))
                     with self.assertRaisesRegex(ValueError, 'Unexpected partition directory layout'):
-                        nds_power._require_partition_files(frame, ['day'], 'day')
+                        nds_power._require_partition_files(
+                            self.spark, frame, ['day'], 'day', str(path))
                     with self.assertRaisesRegex(ValueError, 'Unexpected partition directory layout'):
-                        nds_power._require_partition_files(frame, ['region', 'day'], 'day')
+                        nds_power._require_partition_files(
+                            self.spark, frame, ['region', 'day'], 'day', str(path))
         finally:
             self.spark.conf.set('spark.sql.sources.useV1SourceList', original)
 
@@ -57,10 +60,18 @@ class PartitionMetadataTest(unittest.TestCase):
         (path / 'day=2001-07-01').mkdir()
         selected = nds_power._partitions_at_cutoff(
             self.spark, str(path), 'day', lambda: {}, datetime.date(2001, 7, 1), ['day'])
-        frame = self.spark.read.option('basePath', str(path)).parquet(
-            *[directory for _, directory in selected])
-        with self.assertRaisesRegex(ValueError, 'No dated data files'):
-            nds_power._require_partition_files(frame, ['day'], 'day')
+        original = self.spark.conf.get('spark.sql.sources.useV1SourceList')
+        try:
+            for sources in ('parquet', ''):
+                with self.subTest(sources=sources):
+                    self.spark.conf.set('spark.sql.sources.useV1SourceList', sources)
+                    frame = self.spark.read.option('basePath', str(path)).parquet(
+                        *[directory for _, directory in selected])
+                    with self.assertRaisesRegex(ValueError, 'No dated data files.*null_only_declared_layout'):
+                        nds_power._require_partition_files(
+                            self.spark, frame, ['day'], 'day', str(path))
+        finally:
+            self.spark.conf.set('spark.sql.sources.useV1SourceList', original)
 
 
 if __name__ == '__main__':

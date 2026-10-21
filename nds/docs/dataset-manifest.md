@@ -49,8 +49,8 @@ For this layout, save the following as `metadata/workload.json`:
 }
 ```
 
-The `tables` object must be nonempty. Each table name must contain only ASCII
-letters, digits or underscores, with at least one letter or underscore. Names
+The `tables` object must be nonempty. Each table name must start with an ASCII
+letter or underscore and contain only ASCII letters, digits or underscores. Names
 must be distinct ignoring case: `Foo` and `foo` conflict even when
 `spark.sql.caseSensitive=true`, because Hive catalogs store lowercase table names.
 Only listed tables are registered.
@@ -67,6 +67,13 @@ order. A non-null `date_partition_column` must appear in this list when the list
 is supplied. Column names must match the directory names exactly, including case;
 duplicate column names are rejected ignoring case. Without the list, the driver
 discovers the partition layout from the directories.
+
+Empty stray folders beneath partition leaves are allowed and do not change the
+selected rows. Store data files directly in the partition leaf directories.
+Files inside ordinary nested folders are not supported: Spark can load them in
+temporary views but omit them from catalog tables created for `--analyze`, so
+enabling analysis can change the rows returned. The driver does not perform
+extra directory listings to detect this layout.
 
 An unqualified path such as `/path/to/workload.json` or `metadata/workload.json`
 is a driver-local file, regardless of Spark's default filesystem. An existing
@@ -143,6 +150,8 @@ including `date_dim` itself, remain complete. Analysis uses only the selected
 partitions. For catalog analysis, partition values containing quotes or backslashes
 require `spark.sql.legacy.keepPartitionSpecAsStringLiteral=false` (Spark's default).
 An incompatible setting is rejected before the table is created.
+Partition values and source paths are registered literally: SQL variable
+substitution is temporarily disabled during registration and restored afterward.
 
 For example, both `purchases/region=west/purchase_date=2001-07-01/` and
 `purchases/purchase_date=2001-07-01/region=west/` work with

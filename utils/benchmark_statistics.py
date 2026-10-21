@@ -18,11 +18,19 @@ import os
 import time
 
 
+def catalog_table_exists(session, qualified_name):
+    table_exists = getattr(session.catalog, 'tableExists', None)
+    if table_exists is not None:
+        return table_exists(qualified_name)
+    # PySpark exposed tableExists in 3.3; classic Spark already had the JVM API.
+    return session._jsparkSession.catalog().tableExists(qualified_name)
+
+
 def require_fresh_catalog_tables(session, table_names):
     database = session.catalog.currentDatabase().replace('`', '``')
     for table in table_names:
         qualified = '`' + database + '`.`' + table.replace('`', '``') + '`'
-        if session.catalog.tableExists(qualified):
+        if catalog_table_exists(session, qualified):
             raise ValueError('--analyze requires fresh catalog tables; already exists: ' + qualified)
 
 
