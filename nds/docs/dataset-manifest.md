@@ -49,13 +49,36 @@ For this layout, save the following as `metadata/workload.json`:
 }
 ```
 
-The `tables` object must be nonempty. Each table entry is an object; omitting
-`date_partition_column` or setting it to `null` means no cutoff filtering for
-that table. Only listed tables are registered. Spark infers column schemas and
-existing partitions from the Parquet files.
+The `tables` object must be nonempty. Each table name must start with an ASCII
+letter or underscore and contain only ASCII letters, digits or underscores. Names
+must be distinct ignoring case: `Foo` and `foo` conflict even when
+`spark.sql.caseSensitive=true`, because Hive catalogs store lowercase table names.
+Only listed tables are registered.
+
+Each table entry is an object accepting `date_partition_column` and the optional
+`partition_columns` list. Other table-entry keys are errors, so misspelled loading
+options cannot silently disable a cutoff. Additional top-level metadata, such as
+`parameters`, is permitted and does not affect loading.
+
+Omitting `date_partition_column` or setting it to `null` means no cutoff filtering
+for that table. Spark infers column schemas from the Parquet files. For cutoff
+loading, `partition_columns` can list every directory partition column in physical
+order. A non-null `date_partition_column` must appear in this list when the list
+is supplied. Column names must match the directory names exactly, including case;
+duplicate column names are rejected ignoring case. Without the list, the driver
+discovers the partition layout from the directories.
+
+Empty stray folders beneath partition leaves are allowed and do not change the
+selected rows. Store data files directly in the partition leaf directories.
+Files inside ordinary nested folders are not supported: Spark can load them in
+temporary views but omit them from catalog tables created for `--analyze`, so
+enabling analysis can change the rows returned. The driver does not perform
+extra directory listings to detect this layout.
 
 An unqualified path such as `/path/to/workload.json` or `metadata/workload.json`
-is a driver-local file, regardless of Spark's default filesystem. A URI such as
+is a driver-local file, regardless of Spark's default filesystem. An existing
+local filename containing a colon, such as `workload:v2.json`, is also read locally.
+A URI such as
 `file:///path/to/workload.json`, `hdfs:///metadata/workload.json` or
 `s3a://bucket/metadata/workload.json` uses the corresponding Hadoop filesystem;
 its connector and credentials must be available to the driver. Missing or invalid
@@ -113,22 +136,44 @@ multiple columns. The driver recognizes these partition values:
   with the cutoff. This layout needs no `date_dim` table.
 - Integer date keys, such as `order_day=123`, are resolved using `date_dim`.
   For this layout the manifest must list `date_dim`, containing `d_date_sk`
-  and `d_date`. Each integer key maps to a calendar date in `d_date`; dates
-  may be Spark date values or `YYYY-MM-DD` strings. Keys and dates must be
-  non-null, and a key must not map to conflicting dates.
+  and `d_date`. `d_date_sk` must have an integral Spark type or contain integral
+  decimal values; string keys are not supported. Each key maps to a calendar date in `d_date`, which must have
+  Spark DATE or STRING type containing `YYYY-MM-DD` values. TIMESTAMP values
+  are not supported and produce an error rather than being truncated to dates.
+  Keys and dates must be non-null, and a key must not map to conflicting dates.
 
 The driver includes partitions mapped to dates on or before the cutoff, plus
 NULL-date partitions. NULL partitions have no known date; retaining them does
 not imply they are earlier than the cutoff. Every filtered table must have at
 least one dated partition selected. Tables without a date-partition column,
 including `date_dim` itself, remain complete. Analysis uses only the selected
-partitions.
+partitions. For catalog analysis, partition values containing quotes or backslashes
+require `spark.sql.legacy.keepPartitionSpecAsStringLiteral=false` (Spark's default).
+An incompatible setting is rejected before the table is created.
+Partition values and source paths are registered literally: SQL variable
+substitution is temporarily disabled during registration and restored afterward.
 
 For example, both `purchases/region=west/purchase_date=2001-07-01/` and
 `purchases/purchase_date=2001-07-01/region=west/` work with
-`"date_partition_column": "purchase_date"`. The cutoff selects dates while
-retaining every region within each selected date. Other partition columns
-remain available to SQL queries.
+`"date_partition_column": "purchase_date"`. Each table must use one consistent
+partition order. The cutoff selects dates while retaining every region within
+each selected date. Other partition columns remain available to SQL queries.
+
+For the first layout, the optional metadata is:
+
+```json
+{
+  "date_partition_column": "purchase_date",
+  "partition_columns": ["region", "purchase_date"]
+}
+```
+
+For the second layout, reverse the list to `["purchase_date", "region"]`.
+Providing the complete order lets the driver stop listing directories once it
+reaches a leaf partition. This avoids a separate listing of every selected leaf,
+which can be expensive on cloud storage. Without this metadata, discovery remains
+available. The built-in NDS tables already have known partition layouts and do
+not require a manifest for this optimization.
 
 For Parquet partitioned by a DATE column, the manifest entries can be:
 

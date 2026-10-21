@@ -5,6 +5,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -18,6 +19,23 @@ import nds_power as driver
 
 
 class ManifestHelpersTest(unittest.TestCase):
+    def test_registration_restores_variable_substitution_after_success_or_failure(self):
+        for setting in ('true', 'false'):
+            for fail in (False, True):
+                with self.subTest(setting=setting, fail=fail):
+                    session = Mock()
+                    session.conf.get.return_value = setting
+                    session.catalog.listColumns.return_value = []
+                    if fail:
+                        session.sql.side_effect = RuntimeError('registration failed')
+                        with self.assertRaisesRegex(RuntimeError, 'registration failed'):
+                            driver._create_data_source_table(session, 'orders', '/orders', 'parquet')
+                    else:
+                        driver._create_data_source_table(session, 'orders', '/orders', 'parquet')
+                    self.assertEqual(session.conf.set.call_args_list,
+                                     [unittest.mock.call('spark.sql.variable.substitute', 'false'),
+                                      unittest.mock.call('spark.sql.variable.substitute', setting)])
+
     def session(self, content, exists=True):
         session = Mock()
         filesystem = session._jvm.org.apache.hadoop.fs.Path.return_value.getFileSystem.return_value
@@ -75,10 +93,65 @@ class ManifestHelpersTest(unittest.TestCase):
                     driver._manifest_tables(session, 'hdfs:///custom.json')
                 self.assertTrue(scanner.closed)
 
+    def test_manifest_validates_names_fields_and_ordered_partition_metadata(self):
+        invalid = [
+            ({'': {}}, 'table names'), ({'..': {}}, 'table names'),
+            ({'my-table': {}}, 'table names'), ({'123': {}}, 'table names'),
+            ({'1e5': {}}, 'table names'), ({'1L': {}}, 'table names'),
+            ({'1d': {}}, 'table names'), ({'1table': {}}, 'table names'),
+            ({'Foo': {}, 'foo': {}}, 'Duplicate manifest'),
+            ({'orders': {'date_partition_columns': 'day'}}, 'Unknown manifest table fields'),
+            ({'orders': {'partition_columns': 'day'}}, 'list of nonempty strings'),
+            ({'orders': {'partition_columns': None}}, 'list of nonempty strings'),
+            ({'orders': {'partition_columns': ['']}}, 'list of nonempty strings'),
+            ({'orders': {'partition_columns': ['day', 'DAY']}}, 'Duplicate partition_columns'),
+            ({'orders': {'partition_columns': [], 'date_partition_column': 'day'}},
+             'must occur in partition_columns'),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'manifest.json'
+            for tables, error in invalid:
+                path.write_text(json.dumps({'tables': tables}))
+                with self.subTest(tables=tables), self.assertRaisesRegex(ValueError, error):
+                    driver._manifest_tables(None, str(path))
+            valid = {'Foo': {'partition_columns': ['region', 'day'], 'date_partition_column': 'day'},
+                     '_other123': {'partition_columns': []}}
+            path.write_text(json.dumps({'tables': valid, 'parameters': {'seed': 7}}))
+            session = SimpleNamespace(conf=SimpleNamespace(get=lambda *args: 'true'))
+            self.assertEqual(driver._manifest_tables(session, str(path)), valid)
+            for tables in ({'Foo': {}, 'foo': {}},
+                           {'orders': {'partition_columns': ['day', 'DAY']}}):
+                path.write_text(json.dumps({'tables': tables}))
+                with self.subTest(case_sensitive=True, tables=tables):
+                    with self.assertRaisesRegex(ValueError, 'Duplicate'):
+                        driver._manifest_tables(session, str(path))
+
+    def test_colon_filename_is_local_and_single_slash_file_uri_remains_supported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'workload:v2.json'
+            path.write_text(json.dumps({'tables': {'orders': {}}}))
+            # Use the relative spelling that urlparse would otherwise treat as a scheme.
+            previous = os.getcwd()
+            try:
+                os.chdir(directory)
+                self.assertEqual(driver._manifest_tables(None, 'workload:v2.json'), {'orders': {}})
+            finally:
+                os.chdir(previous)
+            session, _ = self.session(json.dumps({'tables': {'orders': {}}}))
+            self.assertEqual(driver._manifest_tables(session, 'file:/metadata/custom.json'),
+                             {'orders': {}})
+
+    def test_builtin_nds_tables_describe_their_single_date_partition(self):
+        tables = driver._dataset_tables('/data', 'parquet', False)
+        self.assertEqual({name: table['partition_columns'] for name, table in tables.items()
+                          if table['partition_columns'] is not None},
+                         {name: [column] for name, column in driver.DATE_PARTITION_COLUMNS.items()})
+
     def test_explicit_manifest_requires_classic_file_backed_parquet(self):
-        for options in ({'hive_external': True}, {'spark_connect': 'sc://localhost'}):
+        for options, message in (({'hive_external': True}, 'external Hive tables'),
+                                 ({'spark_connect': 'sc://localhost'}, 'Spark Connect')):
             with self.subTest(options=options):
-                with self.assertRaisesRegex(ValueError, '--dataset_manifest requires'):
+                with self.assertRaisesRegex(ValueError, message):
                     driver.run_query_stream('/data', None, {}, '/tmp/times.csv',
                                             None, None, None, 0, 1, None,
                                             dataset_manifest='/custom.json', **options)

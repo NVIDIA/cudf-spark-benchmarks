@@ -51,6 +51,22 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'fresh catalog tables'):
             statistics.require_fresh_catalog_tables(session, ['fresh', 'facts'])
 
+    def test_fresh_catalog_guards_work_before_pyspark_exposed_table_exists(self):
+        session = SimpleNamespace(
+            catalog=SimpleNamespace(currentDatabase=lambda: 'caller'),
+            _jsparkSession=Mock(),
+            sql=Mock(side_effect=AssertionError('Preflight must not create tables')))
+        exists = session._jsparkSession.catalog.return_value.tableExists
+        exists.side_effect = lambda name: name.endswith('.`facts`')
+        with self.assertRaisesRegex(ValueError, 'fresh catalog tables'):
+            statistics.require_fresh_catalog_tables(session, ['fresh', 'facts'])
+        self.assertEqual([call.args[0] for call in exists.call_args_list],
+                         ['`caller`.`fresh`', '`caller`.`facts`'])
+        driver = load_driver('nds', 'nds_power.py')
+        driver._require_fresh_catalog_table(session, 'fresh')
+        with self.assertRaisesRegex(ValueError, 'fresh catalog table'):
+            driver._require_fresh_catalog_table(session, 'facts')
+
     def test_mode_costs_and_optional_json(self):
         for mode in ('table', 'all_columns'):
             for save_json in (False, True):
@@ -151,7 +167,7 @@ class BenchmarkStatisticsTest(unittest.TestCase):
             dropTempView=lambda name: None,
             recoverPartitions=Mock(side_effect=AssertionError('Would load unselected partitions')))
         session = SimpleNamespace(catalog=catalog, sql=Mock(),
-                                  conf=SimpleNamespace(get=lambda *args: 'true'))
+                                  conf=SimpleNamespace(get=lambda *args: 'true', set=Mock()))
         with contextlib.redirect_stdout(io.StringIO()) as output:
             driver._create_data_source_table(
                 session, 'facts', '/facts', 'parquet',

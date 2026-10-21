@@ -4,6 +4,7 @@
 
 import argparse
 import datetime
+from decimal import Decimal
 from pathlib import Path
 import contextlib
 import io
@@ -33,7 +34,10 @@ class FakePath:
 
 def partition_session(entries, forbidden=()):
     filesystem = SimpleNamespace()
-    layout = entries if isinstance(entries, dict) else {'/facts': entries}
+    layout = entries if isinstance(entries, dict) else {
+        '/facts': entries,
+        **{'/facts/' + name: [('part.parquet', False)] for name, directory in entries if directory}
+    }
 
     def list_status(path):
         if path.path in forbidden:
@@ -53,7 +57,34 @@ def partition_session(entries, forbidden=()):
 
 
 class CutoffSelectionTest(unittest.TestCase):
-    def test_cutoff_setup_time_covers_mapping_and_partition_selection_only_when_requested(self):
+    def test_incompatible_catalog_settings_fail_before_creating_any_table(self):
+        for key, value in (
+                ('spark.sql.legacy.keepPartitionSpecAsStringLiteral', ' true '),
+                ('spark.sql.hive.manageFilesourcePartitions', ' false ')):
+            for mode in ('table', 'all_columns', 'legacy'):
+                with self.subTest(key=key, mode=mode):
+                    session = Mock()
+                    session.conf.get.side_effect = lambda name, default=None: (
+                        value if name == key else default or 'application-test')
+                    session.catalog.tableExists.return_value = False
+                    session.catalog.currentDatabase.return_value = 'default'
+                    tables = driver._dataset_tables('/data', 'parquet', False, {
+                        'plain': {}, 'safe': {'date_partition_column': 'day'},
+                        'special': {'date_partition_column': 'day'}})
+                    selected = [[({'day': '2001-01-01', 'region': 'north'}, '/safe')],
+                                [({'day': '2001-01-01', 'region': "o'neil"}, '/special')]]
+                    with patch.object(driver, '_partitions_at_cutoff', side_effect=selected), \
+                            patch.object(driver, '_create_data_source_table') as create:
+                        with self.assertRaisesRegex(ValueError, key.replace('.', r'\.')):
+                            driver.setup_tables(
+                                session, '/data', 'parquet', False, [],
+                                cutoff_date=datetime.date(2001, 1, 1), tables=tables,
+                                analyze=None if mode == 'legacy' else mode,
+                                analyze_tables=mode == 'legacy')
+                        create.assert_not_called()
+                        session.read.format.assert_not_called()
+
+    def test_cutoff_setup_time_includes_selected_frame_loading_and_validation(self):
         for analyze in (False, True):
             for cutoff in (None, datetime.date(2001, 1, 2)):
                 with self.subTest(analyze=analyze, cutoff=cutoff):
@@ -72,16 +103,27 @@ class CutoffSelectionTest(unittest.TestCase):
                         clock[0] += 0.250
                         return [('1', '/facts/date=1')]
 
+                    def load_frame(*args):
+                        clock[0] += 0.250
+                        return Mock()
+
+                    def validate_frame(*args):
+                        clock[0] += 0.500
+
+                    session.read.format.return_value.option.return_value.load.side_effect = load_frame
                     with patch.object(driver.time, 'time', side_effect=lambda: clock[0]), \
                             patch.object(driver, '_date_key_mapping', side_effect=map_dates), \
                             patch.object(driver, '_partitions_at_cutoff', side_effect=select_partitions), \
                             patch.object(driver, '_create_data_source_table'), \
+                            patch.object(driver, '_require_partition_files', side_effect=validate_frame), \
                             contextlib.redirect_stdout(io.StringIO()):
                         timings = driver.setup_tables(session, '/facts', 'parquet', False, [],
                                                       analyze_tables=analyze, cutoff_date=cutoff)
                     preparation = [row for row in timings if row[1] == 'Power Cutoff Setup Time']
                     self.assertEqual(preparation, [] if cutoff is None else
-                                     [('application-test', 'Power Cutoff Setup Time', 1875)])
+                                     [('application-test', 'Power Cutoff Setup Time', 7125)])
+                    self.assertTrue(all(row[2] == 0 for row in timings
+                                        if row[1].startswith('Create')))
 
     def test_selects_cutoff_inclusively_and_keeps_null_partitions(self):
         entries = [('ss_sold_date_sk=3', True), ('_SUCCESS', False),
@@ -149,6 +191,43 @@ class CutoffSelectionTest(unittest.TestCase):
                         datetime.date(2001, 1, 2))
                     self.assertEqual(selected, sorted(expected, key=lambda partition: partition[1]))
 
+    def test_declared_layout_stops_at_leaves_and_checks_the_column_order(self):
+        for columns in (['day'], ['day', '_tenant'], ['_tenant', 'day']):
+            with self.subTest(columns=columns):
+                layout, leaves = {}, set()
+                for day in ('2001-01-01', '2001-01-03'):
+                    path = '/facts'
+                    for column in columns:
+                        name = column + '=' + (day if column == 'day' else 'a')
+                        entries = layout.setdefault(path, [])
+                        if (name, True) not in entries:
+                            entries.append((name, True))
+                        path += '/' + name
+                    leaves.add(path)
+                selected = driver._partitions_at_cutoff(
+                    partition_session(layout, leaves), '/facts', 'day', lambda: {},
+                    datetime.date(2001, 1, 2), columns)
+                self.assertEqual([list(specification) for specification, _ in selected], [columns])
+                self.assertEqual(selected[0][0]['day'], '2001-01-01')
+        with self.assertRaisesRegex(ValueError, 'declared order'):
+            driver._partitions_at_cutoff(
+                partition_session({'/facts': [('region=west', True)]}), '/facts', 'day',
+                lambda: {}, datetime.date(2001, 1, 2), ['day', 'region'])
+
+    def test_discovery_ignores_empty_branches_and_preserves_spark_partition_decoding(self):
+        layout = {'/facts': [('region=empty', True), ('region=%C3%A9', True)],
+                  '/facts/region=empty': [],
+                  '/facts/region=%C3%A9': [('day=2001-01-01', True)],
+                  '/facts/region=%C3%A9/day=2001-01-01': [('part.parquet', False)]}
+        self.assertEqual(driver._partitions_at_cutoff(
+            partition_session(layout), '/facts', 'day', lambda: {}, datetime.date(2001, 1, 2)),
+            [({'region': 'Ã©', 'day': '2001-01-01'},
+              '/facts/region=%C3%A9/day=2001-01-01')])
+        with self.assertRaisesRegex(ValueError, 'No dated partitions'):
+            driver._partitions_at_cutoff(
+                partition_session({'/facts': [('day=2001-01-01', True)]}), '/facts', 'day',
+                lambda: {}, datetime.date(2001, 1, 2))
+
     def test_rejects_invalid_layout_dates_and_null_only_selection(self):
         for entry, message in [
                 (('other_column=1', True), 'Unexpected partition layout'),
@@ -178,6 +257,12 @@ class CutoffSelectionTest(unittest.TestCase):
         for rows in [
                 [SimpleNamespace(d_date_sk=None, d_date=datetime.date(2001, 1, 1))],
                 [SimpleNamespace(d_date_sk=1, d_date=None)],
+                [SimpleNamespace(d_date_sk='1', d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=True, d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=Decimal('1.5'), d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=Decimal('NaN'), d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=Decimal('Infinity'), d_date=datetime.date(2001, 1, 1))],
+                [SimpleNamespace(d_date_sk=1, d_date=datetime.datetime(2001, 1, 1))],
                 [SimpleNamespace(d_date_sk=1, d_date='2001-01-01'),
                  SimpleNamespace(d_date_sk=1, d_date='2001-01-02')]]:
             selected = SimpleNamespace(collect=lambda: rows)
@@ -185,6 +270,15 @@ class CutoffSelectionTest(unittest.TestCase):
             session = SimpleNamespace(read=SimpleNamespace(format=lambda fmt: reader))
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 driver._date_key_mapping(session, '/data', 'parquet', False)
+
+    def test_integral_decimal_date_keys_retain_integer_lookup_semantics(self):
+        rows = [SimpleNamespace(d_date_sk=Decimal('1'), d_date=datetime.date(2001, 1, 1)),
+                SimpleNamespace(d_date_sk=Decimal('2.00'), d_date='2001-01-02')]
+        selected = SimpleNamespace(collect=lambda: rows)
+        reader = SimpleNamespace(load=lambda path: SimpleNamespace(select=lambda *cols: selected))
+        session = SimpleNamespace(read=SimpleNamespace(format=lambda fmt: reader))
+        self.assertEqual(driver._date_key_mapping(session, '/data', 'parquet', False),
+                         {1: datetime.date(2001, 1, 1), 2: datetime.date(2001, 1, 2)})
 
     def test_unsupported_inputs_require_classic_spark_before_construction(self):
         for options in ({'input_format': 'iceberg'}, {'input_format': 'delta'},

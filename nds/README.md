@@ -317,10 +317,17 @@ _After_ user generates query streams, Power Run can be executed using one of the
 map to dates on or before the cutoff in `date_dim`. NULL-date partitions are always
 included, regardless of the cutoff. Dimension tables are read in full. The facts must use the partition layout listed above;
 unknown date keys and unexpected layouts are rejected. Preparation time for reading
-`date_dim` and selecting fact partitions is recorded separately as
+`date_dim`, selecting fact partitions, and loading and validating their file
+metadata is recorded separately as
 `Power Cutoff Setup Time` in milliseconds. Each fact table must
 have at least one dated partition at or before the cutoff, even when it has a
 NULL-date partition.
+
+Empty stray folders beneath partition leaves are allowed. Data files must be
+stored directly in the partition leaf directories: Spark may load files in
+ordinary nested folders through temporary views but omit them from analyzed
+catalog tables. The driver does not add directory listings to detect this
+unsupported layout.
 
 The driver cutoff only restricts data; it does not change query text or date
 literals. Direct callers must supply queries whose date windows fit the loaded
@@ -378,44 +385,136 @@ and `--input_format` cannot appear together, even with `--input_format parquet`.
 Arguments supported by `nds_power.py`:
 
 ```text
-usage: nds_power.py [-h] [--input_format {parquet,orc,avro,csv,json,iceberg,delta} | --dataset_manifest DATASET_MANIFEST] [--output_prefix OUTPUT_PREFIX] [--output_format OUTPUT_FORMAT] [--property_file PROPERTY_FILE] [--floats] [--json_summary_folder JSON_SUMMARY_FOLDER] [--delta_unmanaged] [--hive] [--app_name APP_NAME] [--cutoff_date CUTOFF_DATE] input_prefix query_stream_file time_log
+usage: nds_power.py [-h]
+                    [--input_format {parquet,orc,avro,csv,json,iceberg,delta} | --dataset_manifest DATASET_MANIFEST]
+                    [--cutoff_date CUTOFF_DATE]
+                    [--analyze {none,table,all_columns} | --analyze_tables]
+                    [--output_prefix OUTPUT_PREFIX]
+                    [--output_format OUTPUT_FORMAT]
+                    [--property_file PROPERTY_FILE] [--floats]
+                    [--json_summary_folder JSON_SUMMARY_FOLDER]
+                    [--delta_unmanaged] [--keep_sc] [--hive]
+                    [--extra_time_log EXTRA_TIME_LOG] [--allow_failure]
+                    [--profiling_hook PROFILING_HOOK]
+                    [--warmup_iterations WARMUP_ITERATIONS]
+                    [--iterations ITERATIONS]
+                    [--save_plan_path SAVE_PLAN_PATH]
+                    [--plan_types PLAN_TYPES] [--spark_connect SPARK_CONNECT]
+                    [--skip_execution] [--app_name APP_NAME]
+                    [--sub_queries SUB_QUERIES | --sub_query_patterns SUB_QUERY_PATTERNS]
+                    input_prefix query_stream_file time_log
 
 positional arguments:
-  input_prefix          text to prepend to every input file path (e.g., "hdfs:///ds-generated-data"). If input_format is "iceberg", this argument will be regarded as the value of property "spark.sql.catalog.spark_catalog.warehouse". Only default Spark catalog session name
-                        "spark_catalog" is supported now, customized catalog is not yet supported. Note if this points to a Delta Lake table, the path must be absolute. Issue: https://github.com/delta-io/delta/issues/555
-  query_stream_file     query stream file that contains NDS queries in specific order
+  input_prefix          text to prepend to every input file path (e.g.,
+                        "hdfs:///ds-generated-data"). If --hive or if
+                        input_format is "iceberg", this argument will be
+                        regarded as the value of property
+                        "spark.sql.catalog.spark_catalog.warehouse". Only
+                        default Spark catalog session name "spark_catalog" is
+                        supported now, customized catalog is not yet
+                        supported. Note if this points to a Delta Lake table,
+                        the path must be absolute. Issue:
+                        https://github.com/delta-io/delta/issues/555
+  query_stream_file     query stream file that contains NDS queries in
+                        specific order
   time_log              path to execution time log, only support local path.
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   --input_format {parquet,orc,avro,csv,json,iceberg,delta}
-                        type for input data source, e.g. parquet, orc, json, csv or iceberg, delta. Certain types are not fully supported by GPU reading, please refer to
-  https://github.com/NVIDIA/cudf-spark/blob/main/docs/compatibility.md for more details.
-  --cutoff_date CUTOFF_DATE
-                        load dated fact partitions through YYYY-MM-DD, plus NULL-date partitions;
-                        the caller supplies queries whose dates fit the loaded range.
+                        type for input data source, e.g. parquet, orc, json,
+                        csv or iceberg, delta. Certain types are not fully
+                        supported by GPU reading, please refer to
+                        https://github.com/NVIDIA/cudf-
+                        spark/blob/main/docs/compatibility.md for more
+                        details.
   --dataset_manifest DATASET_MANIFEST
-                        driver-local JSON file or Hadoop filesystem URI defining custom Parquet tables.
+                        Explicit dataset manifest: a driver-local file or
+                        Hadoop-supported URI. Defines custom Parquet tables
+                        instead of --input_format; requires classic Spark.
+  --cutoff_date CUTOFF_DATE
+                        Restrict dated fact partitions through this ISO date,
+                        plus NULL. Does not shift SQL dates; callers must
+                        supply queries whose dates fit the loaded data.
+  --analyze {none,table,all_columns}
+                        Compute input statistics and record their cost; none
+                        leaves loading unchanged.
+  --analyze_tables      Deprecated: use --analyze table for supported file-
+                        backed inputs.
   --output_prefix OUTPUT_PREFIX
-                        text to prepend to every output file (e.g., "hdfs:///ds-parquet")
+                        text to prepend to every output file (e.g.,
+                        "hdfs:///ds-parquet")
   --output_format OUTPUT_FORMAT
                         type of query output
   --property_file PROPERTY_FILE
                         property file for Spark configuration.
-  --floats              When loading Text files like json and csv, schemas are required to determine if certain parts of the data are read as decimal type or not. If specified, float data will be used.
+  --floats              When loading Text files like json and csv, schemas are
+                        required to determine if certain parts of the data are
+                        read as decimal type or not. If specified, float data
+                        will be used.
   --json_summary_folder JSON_SUMMARY_FOLDER
-                        Empty folder/path (will create if not exist) to save JSON summary file for each query.
-  --delta_unmanaged     Use unmanaged tables for DeltaLake. This is useful for testing DeltaLake without leveraging a
-                        Metastore service
-  --hive                use table meta information in Hive metastore directly without registering temp views.
-  --app_name APP_NAME   The name of the Spark application. If not specified, the default is "NDS - Power Run". Useful
-                        for identifying runs in cluster UIs and logs. Automatic naming based on a single query (for
-                        example, "NDS - query1") is currently not supported.
+                        Empty folder/path (will create if not exist) to save
+                        JSON summary file for each query.
+  --delta_unmanaged     Use unmanaged tables for DeltaLake. This is useful for
+                        testing DeltaLake without leveraging a Metastore
+                        service.
+  --keep_sc             Keep SparkContext alive after running all queries.
+                        This is a limitation on Databricks runtime
+                        environment. User should always attach this flag when
+                        running on Databricks.
+  --hive                use table meta information in Hive metastore directly
+                        without registering temp views.
   --extra_time_log EXTRA_TIME_LOG
-                        extra path to save time log when running in cloud environment where driver node/pod cannot be accessed easily. User needs to add essential extra jars and configurations to access different cloud storage systems. e.g. s3, gs etc.
+                        extra path to save time log when running in cloud
+                        environment where driver node/pod cannot be accessed
+                        easily. User needs to add essential extra jars and
+                        configurations to access different cloud storage
+                        systems. e.g. s3, gs etc.
+  --allow_failure       Do not exit with non zero when any query failed or any
+                        task failed
+  --profiling_hook PROFILING_HOOK
+                        Executable that is called just before/after a query
+                        executes.The executable is called like this ./hook
+                        {start|stop} output_root query_name.
+  --warmup_iterations WARMUP_ITERATIONS
+                        Number of warmup iterations for each query.
+  --iterations ITERATIONS
+                        Number of iterations for each query.
+  --save_plan_path SAVE_PLAN_PATH
+                        Save the execution plan of each query to the specified
+                        file. If --skip_execution is specified, the execution
+                        plan will be saved without executing the query.
+  --plan_types PLAN_TYPES
+                        Comma separated list of plan types to save. e.g.
+                        "physical, logical". Default is "logical".
+  --spark_connect SPARK_CONNECT
+                        Spark Connect URI, e.g.
+                        sc://localhost:15002/;use_ssl=true;token=spark-secret-
+                        token
+  --skip_execution      Skip the execution of the queries. This can be used in
+                        conjunction with --save_plan_path to only save the
+                        execution plans without running the queries.Note that
+                        "spark.sql.adaptive.enabled" should be set to false to
+                        get GPU physical plans.
+  --app_name APP_NAME   The name of the application. If not specified, the
+                        default name will be "NDS - Power Run", or "NDS -
+                        <query_name>" when running a single query.
   --sub_queries SUB_QUERIES
-                        comma separated list of queries to run. If not specified, all queries in the stream file will be run. e.g. "query1,query2,query3". Note, use "_part1" and "_part2" suffix for the following query names: query14, query23, query24, query39. e.g. query14_part1,
-                        query39_part2
+                        comma separated list of queries to run. If this is
+                        specified, sub_query_patterns should be empty. If both
+                        sub_queries and sub_query_patterns are not specified,
+                        all queries in the stream file will be run. Note, use
+                        "_part1" and "_part2" suffix for the following query
+                        names: query14, query23, query24, and query39. Ex)
+                        "query1,query2,query14_part1,query39_part2"
+  --sub_query_patterns SUB_QUERY_PATTERNS
+                        comma separated list of query patterns to run in
+                        regex. If this is specified, sub_queries should be
+                        empty. If both sub_queries and sub_query_patterns are
+                        not specified, all queries in the stream file will be
+                        run. For example, query1 will run all queries starting
+                        with "query1", and "^query1$,query(2|3)_part1" will
+                        run query1, query2_part1, and query3_part1.
 ```
 
 #### Power Run with spark-submit
