@@ -126,7 +126,9 @@ optional arguments:
                       generated in one run. Format: "start,end", both are inclusive. e.g. "1,100". Note:
                       the child range must be within the "parallel", "--parallel 100 --range 100,200" is
                       illegal.
-  --overwrite_output  overwrite if there has already existing data in the path provided.
+  --overwrite_output  allow replacing existing output. In local --update mode, replace the entire
+                      output directory after generation succeeds, including earlier child ranges
+                      when --range is used.
   --replication REPLICATION
                       the number of replication factor when generating data to HDFS. if not set, the Hadoop job will use the setting in the Hadoop cluster.
   --update UPDATE     generate refresh dataset <n>, where <n> is the refresh set number from 1 to Sq,
@@ -138,6 +140,20 @@ Example command:
 ```bash
 python nds_gen_data.py hdfs 100 100 /data/raw_sf100 --overwrite_output
 ```
+
+For local update generation, `--overwrite_output` replaces the entire output
+directory after all generator processes succeed. This removes differently named
+files, other table directories, and earlier child ranges. If generation fails,
+the existing output remains unchanged. For example:
+
+```bash
+python nds_gen_data.py local 10 4 /data/refresh_1 --update 1 --range 1,2
+python nds_gen_data.py local 10 4 /data/refresh_1 --update 1 --range 3,4 --overwrite_output
+```
+
+The second command replaces the first command's output with children 3 and 4
+and one copy of each shared delete file. To keep outputs from multiple ranges,
+generate each range into a separate directory.
 
 ### Convert CSV to Parquet or Other data sources
 
