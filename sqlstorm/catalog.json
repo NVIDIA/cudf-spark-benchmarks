@@ -1,0 +1,74 @@
+{
+  "schema_version": "sqlstorm.query-catalog.v1",
+  "upstream_repository": "https://github.com/SQL-Storm/SQLStorm",
+  "upstream_revision": "b3bb0b96794a6afe9bb8f3ff2b243562b779c40d",
+  "tracking_issue": "https://github.com/NVIDIA/cudf-spark-benchmarks/issues/296",
+  "upstream_license": "MIT",
+  "license_sha256": "c00a4e6563b1984606f42a67c65408a10f95a82bede5538a614882122d351e3c",
+  "catalog_sha256": "3301fb5b1e7fdc8c6832866a0248b30b2c70d18022645234eeb0bdeda506c8e0",
+  "excluded_sha256": "f9f9ff991fa2217fed111f54d5af3ed45a179bbb8be16b59416acf0c0c94a3b0",
+  "original_corpus_by_dataset": {
+    "nds": 15242,
+    "nds-h": 17036
+  },
+  "included_by_dataset": {
+    "nds": 13269,
+    "nds-h": 12994
+  },
+  "variants": {
+    "original": 23399,
+    "spark_adapted": 2864
+  },
+  "suites": {
+    "nds": {
+      "extended": 13264,
+      "pending": 5
+    },
+    "nds-h": {
+      "extended": 12976,
+      "pending": 18
+    }
+  },
+  "excluded_by_dataset": {
+    "nds": 300,
+    "nds-h": 300
+  },
+  "historical_evidence_sha256": {
+    "original_execution_progress": "a93b6d25bcea858f2ae54a61b6c48014f3364d9d40c1c847358150052011b235",
+    "adapted_results": "3afb50e7e2ffdcf25454800986bb31dcc2d0670d8baf148ffde30f5d53b2ce34"
+  },
+  "validation_campaigns": {
+    "saved_reference_smoke_spark404_sf1": {
+      "spark": "4.0.4",
+      "dataset_scale": "SF1",
+      "plugin_version": "26.12.0-20261027.183146-15",
+      "scope": "Historical Jenkins GPU regression: 12 queries per dataset matched the saved CPU reference.",
+      "summary_sha256": {
+        "nds": "3ec06eb6cb17ba033a865184681619bb05331fb47f94edbcae397e5954b15db6",
+        "nds-h": "51c52cb8af5473ba682ca357584f7c776825f16806f107d86c7a4f7d796eb24e"
+      }
+    },
+    "original_gpu_spark357_sf1": {
+      "spark": "3.5.7",
+      "scala": "2.12",
+      "dataset_scale": "SF1",
+      "gpu": "A40",
+      "plugin_version": "26.10.0-SNAPSHOT",
+      "plugin_revision": "d5131411543394678ff44cbca4b59582cfe14341",
+      "plugin_sha256": "3079cf089caab39bd95cfe9930738852cd53ef85826d1e2dd2430d42165c8894",
+      "scope": "GPU execution only; no complete CPU correctness reference."
+    },
+    "adapted_cpu_gpu_spark404_sf1": {
+      "spark": "4.0.4",
+      "scala": "2.13",
+      "dataset_scale": "SF1",
+      "gpu": "A40",
+      "plugin_version": "26.12.0-20261027.183146-15",
+      "plugin_sha256": "f6fd240e425ed1fda5df06dd00025acd9fe96458e0179c94d32686d6890e9d66",
+      "cpu_java": "17.0.12 or 17.0.20",
+      "gpu_java": "17.0.20",
+      "scope": "Full execution/comparison attempts with exact, mismatching and unvalidated states retained."
+    }
+  },
+  "interpretation": "Included SQL is not an automatic correctness pass. CPU failures are excluded; timeouts and known GPU issues remain explicit."
+}

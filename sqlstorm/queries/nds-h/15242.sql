@@ -1,0 +1,4 @@
+SELECT l_returnflag, l_linestatus, SUM(l_quantity) AS sum_quantity, SUM(l_extendedprice) AS sum_extendedprice
+FROM lineitem
+GROUP BY l_returnflag, l_linestatus
+ORDER BY l_returnflag, l_linestatus;

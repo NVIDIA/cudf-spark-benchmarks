@@ -1,0 +1,14 @@
+SELECT
+    p.p_partkey,
+    p.p_name,
+    s.s_name,
+    ps.ps_availqty,
+    ps.ps_supplycost
+FROM
+    part p
+JOIN
+    partsupp ps ON p.p_partkey = ps.ps_partkey
+JOIN
+    supplier s ON ps.ps_suppkey = s.s_suppkey
+ORDER BY
+    p.p_partkey;

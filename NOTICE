@@ -13,3 +13,12 @@ Copyright (c) 2016 Alexander Gorokhov
 
 This product includes software developed by
 Alexander Gorokhov in project pyspark-spy at https://github.com/sashgorokhov/pyspark-spy
+
+SQLStorm query corpus
+Copyright (c) 2025, TUM
+
+The SQL files under sqlstorm/queries/ are copied or adapted from SQLStorm at
+https://github.com/SQL-Storm/SQLStorm, revision
+b3bb0b96794a6afe9bb8f3ff2b243562b779c40d. Their MIT license and copyright
+notice are retained in sqlstorm/queries/LICENSE. This third-party license
+applies to these SQL files; new repository utilities use Apache-2.0.

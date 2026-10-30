@@ -1,0 +1,3 @@
+# Preserve the pinned third-party SQL bytes, including original line endings.
+sqlstorm/queries/nds/*.sql -text -whitespace
+sqlstorm/queries/nds-h/*.sql -text -whitespace

@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,4 +48,10 @@ jobs:
             *.java,
             *Makefile*,
             *.sql
-      
+          # SQLStorm retains TUM's MIT notice and exact SQL bytes. Its dedicated
+          # corpus check verifies the license and hashes instead of requiring
+          # an NVIDIA copyright assertion on third-party SQL.
+          excluded_file_patterns: |
+            sqlstorm/queries/nds/*.sql,
+            sqlstorm/queries/nds-h/*.sql
+

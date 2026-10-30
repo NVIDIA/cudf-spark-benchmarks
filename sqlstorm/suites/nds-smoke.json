@@ -1,0 +1,22 @@
+{
+  "dataset": "nds",
+  "spark_version": "4.0.4",
+  "selected": [
+    "16",
+    "30",
+    "37",
+    "47",
+    "109",
+    "2093",
+    "3109",
+    "6191",
+    "928",
+    "9141",
+    "26859",
+    "21689"
+  ],
+  "scope": "SF1 fixed-input validation; adapted queries require a recorded source/adapted result comparison before CPU reference creation",
+  "ordering_review": {
+    "21689": "Final GROUP BY ca_state is fully ordered by ca_state. RankSales has one grouped row per ws_item_sk partition; its row_num is unused. Literal FETCH 20 is rewritten to LIMIT 20."
+  }
+}

@@ -6,6 +6,7 @@ A repo for Spark related benchmark sets and utilities using the
 ## Benchmark sets:
 - [NVIDIA Decision Support ( NDS )](./nds/)
 - [NVIDIA Decision Support-H ( NDS-H )](./nds-h/)
+- [SQLStorm NDS and NDS-H extension queries](./sqlstorm/)
 
 Please see README in each benchmark set for more details including building instructions and usage
 descriptions.

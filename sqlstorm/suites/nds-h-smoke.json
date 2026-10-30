@@ -1,0 +1,26 @@
+{
+  "dataset": "nds-h",
+  "spark_version": "4.0.4",
+  "selected": [
+    "107",
+    "12",
+    "131",
+    "18",
+    "19",
+    "578",
+    "1602",
+    "1671",
+    "241",
+    "20546",
+    "22260",
+    "2203"
+  ],
+  "resource_review": {
+    "6": "SF1 complete output exceeds the 100000-row smoke capture limit; retained for a separate larger-output campaign",
+    "17": "SF1 complete output exceeds the 100000-row smoke capture limit; retained for a separate larger-output campaign"
+  },
+  "scope": "SF1 fixed-input validation; adapted queries require a recorded source/adapted result comparison before CPU reference creation",
+  "ordering_review": {
+    "2203": "Final GROUP BY r_name is fully ordered by r_name. The RankedOrders CTE is unused. Literal OFFSET 0/FETCH 10 is rewritten to LIMIT 10 OFFSET 0."
+  }
+}

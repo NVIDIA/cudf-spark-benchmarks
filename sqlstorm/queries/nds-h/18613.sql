@@ -1,0 +1,13 @@
+SELECT
+    p_brand,
+    COUNT(*) AS part_count,
+    SUM(ps_supplycost * ps_availqty) AS total_cost
+FROM
+    part
+JOIN
+    partsupp ON part.p_partkey = partsupp.ps_partkey
+GROUP BY
+    p_brand
+ORDER BY
+    total_cost DESC
+LIMIT 10;

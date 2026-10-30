@@ -1,0 +1,9 @@
+SELECT n_name, SUM(l_extendedprice) AS total_revenue
+FROM nation
+JOIN supplier ON n_nationkey = s_nationkey
+JOIN partsupp ON s_suppkey = ps_suppkey
+JOIN part ON ps_partkey = p_partkey
+JOIN lineitem ON p_partkey = l_partkey
+JOIN orders ON l_orderkey = o_orderkey
+GROUP BY n_name
+ORDER BY total_revenue DESC;

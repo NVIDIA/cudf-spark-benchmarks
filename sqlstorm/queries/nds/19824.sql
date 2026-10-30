@@ -1,0 +1,14 @@
+
+SELECT
+    c.c_customer_id,
+    COUNT(sr.sr_ticket_number) AS return_count,
+    SUM(sr.sr_return_amt) AS total_return_amount
+FROM
+    customer c
+JOIN
+    store_returns sr ON c.c_customer_sk = sr.sr_customer_sk
+GROUP BY
+    c.c_customer_id
+ORDER BY
+    return_count DESC
+LIMIT 10;

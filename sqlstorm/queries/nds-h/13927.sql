@@ -1,0 +1,22 @@
+SELECT 
+    p.p_partkey,
+    p.p_name,
+    sum(ps.ps_availqty) AS total_available_quantity,
+    avg(ps.ps_supplycost) AS average_supply_cost,
+    r.r_name AS region_name,
+    n.n_name AS nation_name
+FROM 
+    part p
+JOIN 
+    partsupp ps ON p.p_partkey = ps.ps_partkey
+JOIN 
+    supplier s ON ps.ps_suppkey = s.s_suppkey
+JOIN 
+    nation n ON s.s_nationkey = n.n_nationkey
+JOIN 
+    region r ON n.n_regionkey = r.r_regionkey
+GROUP BY 
+    p.p_partkey, p.p_name, r.r_name, n.n_name
+ORDER BY 
+    total_available_quantity DESC
+LIMIT 100;

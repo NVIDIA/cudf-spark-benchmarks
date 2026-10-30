@@ -1,0 +1,13 @@
+SELECT
+    p.p_brand,
+    SUM(ls.l_extendedprice * (1 - ls.l_discount)) AS total_revenue
+FROM
+    part p
+JOIN
+    lineitem ls ON p.p_partkey = ls.l_partkey
+WHERE
+    ls.l_shipdate >= '1997-01-01' AND ls.l_shipdate < '1998-01-01'
+GROUP BY
+    p.p_brand
+ORDER BY
+    total_revenue DESC;

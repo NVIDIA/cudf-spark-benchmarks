@@ -1,0 +1,38 @@
+WITH CustomerStats AS (
+    SELECT 
+        c.c_customer_sk,
+        c.c_first_name,
+        c.c_last_name,
+        cd.cd_gender,
+        cd.cd_marital_status,
+        cd.cd_purchase_estimate,
+        cd.cd_credit_rating,
+        COUNT(ws.ws_order_number) AS total_orders,
+        SUM(COALESCE(ws.ws_net_profit, 0)) AS total_profit
+    FROM 
+        customer c
+    LEFT JOIN 
+        customer_demographics cd ON c.c_current_cdemo_sk = cd.cd_demo_sk
+    LEFT JOIN 
+        web_sales ws ON c.c_customer_sk = ws.ws_bill_customer_sk
+    GROUP BY 
+        c.c_customer_sk, c.c_first_name, c.c_last_name, cd.cd_gender, cd.cd_marital_status, cd.cd_purchase_estimate, cd.cd_credit_rating
+),
+TopCustomers AS (
+    SELECT 
+        c.*,
+        RANK() OVER (PARTITION BY c.cd_gender ORDER BY c.total_profit DESC) AS rank
+    FROM 
+        CustomerStats c
+)
+SELECT 
+    tc.c_first_name,
+    tc.c_last_name,
+    tc.cd_gender,
+    tc.total_profit
+FROM 
+    TopCustomers tc
+WHERE 
+    tc.rank <= 5
+ORDER BY 
+    tc.cd_gender, tc.total_profit DESC;

@@ -1,0 +1,24 @@
+{
+  "dataset": "nds-h",
+  "selected": [
+    "1211",
+    "20715",
+    "21451",
+    "22054",
+    "23576",
+    "24476",
+    "25166",
+    "25888",
+    "28200",
+    "29078",
+    "29229",
+    "30783",
+    "31803",
+    "32472",
+    "33166",
+    "33516",
+    "34056",
+    "34839"
+  ],
+  "scope": "Explicit opt-in for GPU timeout or known execution failure; not a passing suite."
+}
