@@ -74,6 +74,12 @@ class DeltaCloneScope:
 
     def clone_table(self, source_path, table_name):
         """Create a managed shallow clone whose unqualified name resolves in this scope."""
+        # Delta SQL recognizes path-based identifiers only when the path is absolute.
+        # Use Hadoop's working directory and default filesystem, as Spark's readers do.
+        path = self._spark_session._jvm.org.apache.hadoop.fs.Path(source_path)
+        if not path.isAbsolute():
+            hadoop_conf = self._spark_session._jsparkSession.sessionState().newHadoopConf()
+            source_path = path.getFileSystem(hadoop_conf).makeQualified(path).toString()
         table_identifier = "{}.{}".format(
             self._database_identifier, _quote_identifier(table_name))
         source_identifier = "delta.{}".format(_quote_identifier(source_path))

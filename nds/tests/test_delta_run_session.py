@@ -15,7 +15,7 @@ from pyspark.sql.utils import AnalysisException
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'nds'))
 import nds_power
-from delta_clone import new_run_session
+from delta_clone import DeltaCloneScope, new_run_session
 
 sys.path.insert(0, str(ROOT / 'nds-h'))
 spec = importlib.util.spec_from_file_location('nds_h_session_power', ROOT / 'nds-h/nds_h_power.py')
@@ -109,6 +109,37 @@ class DeltaRunSessionTest(unittest.TestCase):
         self.assertEqual(run.conf.get('spark.rapids.sql.enabled'), 'false')
         self.assertEqual(run.conf.get('spark.sql.shuffle.partitions'), '17')
         self.assertEqual(self.spark.conf.get('spark.sql.shuffle.partitions'), '13')
+
+    def test_clone_resolves_relative_path_against_hadoop_working_directory(self):
+        path_type = self.spark._jvm.org.apache.hadoop.fs.Path
+        filesystem = path_type('convert/delta_sf1/customer_address').getFileSystem(
+            self.spark._jsparkSession.sessionState().newHadoopConf())
+        previous_directory = filesystem.getWorkingDirectory()
+        working_directory = self.root / 'hadoop-working-directory'
+        working_directory.mkdir()
+        filesystem.setWorkingDirectory(path_type(str(working_directory)))
+        try:
+            with DeltaCloneScope(self.spark, 'nds_path_test') as scope:
+                with patch.object(self.spark, 'sql') as sql:
+                    scope.clone_table('convert/delta_sf1/customer_address', 'customer_address')
+                sql.assert_called_once_with(
+                    'CREATE TABLE `{}`.`customer_address` SHALLOW CLONE delta.`file:{}`'.format(
+                        scope.database_name, working_directory / 'convert/delta_sf1/customer_address'))
+        finally:
+            filesystem.setWorkingDirectory(previous_directory)
+
+    def test_clone_preserves_absolute_paths_and_quoted_remote_uris(self):
+        sources = ['/reference/customer_address', 'file:/reference/customer_address',
+                   'hdfs://namenode/reference/customer_address',
+                   's3a://bucket/reference/customer_address',
+                   'abfss://container/reference`data/customer_address']
+        with DeltaCloneScope(self.spark, 'nds_path_test') as scope:
+            for source in sources:
+                with self.subTest(source=source), patch.object(self.spark, 'sql') as sql:
+                    scope.clone_table(source, 'customer_address')
+                    sql.assert_called_once_with(
+                        'CREATE TABLE `{}`.`customer_address` SHALLOW CLONE delta.`{}`'.format(
+                            scope.database_name, source.replace('`', '``')))
 
 
 if __name__ == '__main__':
