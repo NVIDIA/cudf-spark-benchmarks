@@ -9,10 +9,69 @@ import unittest
 from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from delta_clone import DeltaCloneScope, new_run_session
+from delta_clone import DeltaCloneScope, new_run_session, _validate_clone_warehouse
 
 
 class DeltaCloneScopeTest(unittest.TestCase):
+    def _warehouse_session(self, master, warehouse, scheme, allow_local='false'):
+        spark = Mock()
+        spark.sparkContext.master = master
+        spark.conf.get.side_effect = lambda key, *default: {
+            'spark.sql.warehouse.dir': warehouse,
+            'spark.benchmarks.delta.allowLocalWarehouse': allow_local,
+        }[key]
+        path = spark._jvm.org.apache.hadoop.fs.Path.return_value
+        path.toUri.return_value.getScheme.return_value = scheme
+        return spark
+
+    def test_nonlocal_local_warehouse_fails_before_catalog_mutation(self):
+        for master in ('spark://cluster:7077', 'yarn', 'k8s://cluster', 'local-cluster[2,1,1024]'):
+            with self.subTest(master=master):
+                spark = self._warehouse_session(master, 'file:/driver/warehouse', 'file')
+                with self.assertRaisesRegex(ValueError, 'spark.sql.warehouse.dir=.*local filesystem'):
+                    DeltaCloneScope(spark, 'nds_delta_run')
+                spark.sql.assert_not_called()
+                spark.catalog.setCurrentDatabase.assert_not_called()
+
+    def test_scheme_less_warehouse_uses_hadoop_default_filesystem(self):
+        for scheme in ('file', 'hdfs'):
+            with self.subTest(scheme=scheme):
+                spark = self._warehouse_session('yarn', '/warehouse', None)
+                path = spark._jvm.org.apache.hadoop.fs.Path.return_value
+                path.getFileSystem.return_value.getUri.return_value.getScheme.return_value = scheme
+                if scheme == 'file':
+                    with self.assertRaisesRegex(ValueError, 'shared warehouse'):
+                        _validate_clone_warehouse(spark)
+                else:
+                    _validate_clone_warehouse(spark)
+
+    def test_remote_warehouse_does_not_require_a_filesystem_client(self):
+        for scheme in ('hdfs', 'viewfs', 's3a', 'abfss'):
+            with self.subTest(scheme=scheme):
+                spark = self._warehouse_session('yarn', scheme + '://storage/warehouse', scheme)
+                _validate_clone_warehouse(spark)
+                spark._jvm.org.apache.hadoop.fs.Path.return_value.getFileSystem.assert_not_called()
+
+    def test_local_masters_keep_local_warehouse_support(self):
+        for master in ('local', 'local[2]', 'local[*]'):
+            with self.subTest(master=master):
+                spark = self._warehouse_session(master, 'file:/warehouse', 'file')
+                _validate_clone_warehouse(spark)
+                spark.conf.get.assert_not_called()
+
+    def test_local_warehouse_requires_explicit_true_override(self):
+        for value in ('false', '', '1', 'TRUE'):
+            with self.subTest(value=value):
+                spark = self._warehouse_session('spark://cluster:7077', 'file:/warehouse',
+                                                'file', value)
+                if value == 'TRUE':
+                    with self.assertLogs('delta_clone', level='WARNING') as logs:
+                        _validate_clone_warehouse(spark)
+                    self.assertIn('every executor share this storage', '\n'.join(logs.output))
+                else:
+                    with self.assertRaisesRegex(ValueError, 'allowLocalWarehouse=true'):
+                        _validate_clone_warehouse(spark)
+
     def test_classic_session_does_not_import_optional_connect_dependencies(self):
         spark = Mock()
         entries = spark._jsparkSession.conf.return_value.getAll.return_value.iterator.return_value

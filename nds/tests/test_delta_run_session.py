@@ -100,6 +100,27 @@ class DeltaRunSessionTest(unittest.TestCase):
                          self.spark.conf.get('spark.sql.warehouse.dir'))
         self.assertIn('spark.sql.warehouse.dir', '\n'.join(logs.output))
 
+    def test_real_local_warehouse_is_rejected_before_database_creation(self):
+        databases = {database.name for database in self.spark.catalog.listDatabases()}
+        with patch.object(self.spark.sparkContext, 'master', 'spark://cluster:7077'), \
+                patch.object(self.spark, 'sql', wraps=self.spark.sql) as sql:
+            with self.assertRaisesRegex(ValueError, 'shared warehouse'):
+                DeltaCloneScope(self.spark, 'nds_warehouse_guard')
+            sql.assert_not_called()
+        self.assertEqual(databases,
+                         {database.name for database in self.spark.catalog.listDatabases()})
+
+    def test_explicit_single_host_override_creates_and_cleans_real_database(self):
+        run = new_run_session(self.spark, {'spark.benchmarks.delta.allowLocalWarehouse': 'true'})
+        with patch.object(run.sparkContext, 'master', 'spark://cluster:7077'), \
+                self.assertLogs('delta_clone', level='WARNING'):
+            with DeltaCloneScope(run, 'nds_single_host') as scope:
+                database_name = scope.database_name
+                self.assertEqual(run.catalog.currentDatabase(), database_name)
+        self.assertNotIn(database_name, {database.name for database in run.catalog.listDatabases()})
+        self.assertEqual(run.catalog.currentDatabase(), self.spark.catalog.currentDatabase())
+        self.assertIsNone(self.spark.conf.get('spark.benchmarks.delta.allowLocalWarehouse', None))
+
     def test_caller_settings_are_inherited_before_property_overrides(self):
         self.spark.conf.set('spark.sql.adaptive.enabled', 'false')
         self.spark.conf.set('spark.sql.shuffle.partitions', '13')

@@ -52,10 +52,41 @@ def _quote_identifier(identifier):
     return "`{}`".format(identifier.replace("`", "``"))
 
 
+def _validate_clone_warehouse(spark_session):
+    """Reject driver-local clone storage before creating any catalog objects."""
+    master = spark_session.sparkContext.master
+    if master == 'local' or master.startswith('local['):
+        return
+
+    warehouse = spark_session.conf.get('spark.sql.warehouse.dir')
+    path = spark_session._jvm.org.apache.hadoop.fs.Path(warehouse)
+    scheme = path.toUri().getScheme()
+    if scheme is None:
+        hadoop_conf = spark_session._jsparkSession.sessionState().newHadoopConf()
+        scheme = path.getFileSystem(hadoop_conf).getUri().getScheme()
+    if scheme != 'file':
+        return
+
+    allow_local = 'spark.benchmarks.delta.allowLocalWarehouse'
+    if spark_session.conf.get(allow_local, 'false').lower() == 'true':
+        logger.warning('Using local Delta clone warehouse %s on %s; the caller must ensure '
+                       'the driver and every executor share this storage', warehouse, master)
+        return
+    raise ValueError(
+        'Delta shallow clones require a shared warehouse on non-local Spark masters; '
+        'spark.sql.warehouse.dir={} resolves to the local filesystem. Set '
+        '--conf spark.sql.warehouse.dir=hdfs:///benchmarks/delta-clones at application '
+        'startup (or DELTA_CLONE_WAREHOUSE with the NDS Delta run templates). '
+        'For single-host standalone testing or a file: path mounted identically on every '
+        'node, explicitly set --conf {}=true only after verifying shared read/write access.'
+        .format(warehouse, allow_local))
+
+
 class DeltaCloneScope:
     """Own a unique database of managed shallow clones in a run-owned SQL session."""
 
     def __init__(self, spark_session, database_prefix):
+        _validate_clone_warehouse(spark_session)
         self._spark_session = spark_session
         self.previous_database = spark_session.catalog.currentDatabase()
         self.database_name = "{}_{}".format(database_prefix, uuid.uuid4().hex)
