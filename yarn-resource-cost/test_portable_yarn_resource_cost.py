@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import calculate_yarn_job_cost as reporting
 import yarn_job_cost_adapters as adapters
 import yarn_job_cost_core as core
 
@@ -71,6 +72,214 @@ class ProviderNeutralAccountingTest(unittest.TestCase):
             evidence = core.parse_yarn_logs(path)
         self.assertEqual("DominantResourceCalculator", evidence.calculator_class)
         self.assertEqual("DominantResourceFairnessPolicy", evidence.scheduler_policy)
+
+    def test_nodemanager_registration_preserves_reported_worker_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            path = log_dir / "hadoop-yarn-nodemanager.log"
+            path.write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker1:8041 with total resource of "
+                "<memory:8192, vCores:8, yarn.io/gpu:1>\n"
+                "2026-01-01 00:00:01,000 INFO X: Start request for "
+                "container_1_0001_01_000002 with resource "
+                "<memory:2048, vCores:2, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        node = evidence.nodes["worker1"]
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertEqual(8192, node.memory_mb)
+        self.assertEqual(1, node.resources["yarn.io/gpu"])
+        self.assertTrue(node.registered_with_rm)
+        self.assertEqual("worker1", container.node_id)
+        self.assertEqual(8192, container.node_memory_mb)
+
+    def test_nodemanager_identity_is_preserved_across_split_log_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            (log_dir / "00-start.log").write_text(
+                "2026-01-01 00:00:01,000 INFO X: Start request for "
+                "container_1_0001_01_000002 with resource "
+                "<memory:2048, vCores:2, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            (log_dir / "01-registration.log").write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker1:8041 with total resource of "
+                "<memory:8192, vCores:8, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertEqual("worker1", container.node_id)
+        self.assertEqual(8192, container.node_memory_mb)
+        self.assertEqual(8, container.node_vcores)
+        self.assertEqual(1, container.node_gpus)
+
+    def test_nodemanager_identity_does_not_cross_workers_in_same_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            (log_dir / "00-worker-a.log").write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker-a:8041 with total resource of "
+                "<memory:8192, vCores:8, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            (log_dir / "01-worker-b.log").write_text(
+                "2026-01-01 00:00:01,000 INFO X: Start request for "
+                "container_1_0001_01_000002 with resource "
+                "<memory:2048, vCores:2, yarn.io/gpu:1>\n"
+                "2026-01-01 00:00:02,000 INFO X: Registered with ResourceManager "
+                "as worker-b:8041 with total resource of "
+                "<memory:16384, vCores:16, yarn.io/gpu:2>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertEqual("worker-b", container.node_id)
+        self.assertEqual(16384, container.node_memory_mb)
+        self.assertEqual(16, container.node_vcores)
+        self.assertEqual(2, container.node_gpus)
+
+    def test_ambiguous_split_nodemanager_logs_do_not_guess_worker_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            (log_dir / "00-worker-a.log").write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker-a:8041 with total resource of "
+                "<memory:8192, vCores:8, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            (log_dir / "01-worker-b.log").write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker-b:8041 with total resource of "
+                "<memory:16384, vCores:16, yarn.io/gpu:2>\n",
+                encoding="utf-8",
+            )
+            (log_dir / "02-start.log").write_text(
+                "2026-01-01 00:00:01,000 INFO X: Start request for "
+                "container_1_0001_01_000002 with resource "
+                "<memory:2048, vCores:2, yarn.io/gpu:1>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertEqual("hadoop-yarn", container.node_id)
+        self.assertEqual(0, container.node_memory_mb)
+        self.assertEqual(0, container.node_vcores)
+        self.assertEqual(0, container.node_gpus)
+
+    def test_explicit_file_host_is_not_relabelled_by_later_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "worker-a"
+            log_dir.mkdir()
+            path = log_dir / "hadoop-yarn-nodemanager.log"
+            path.write_text(
+                "2026-01-01 00:00:00,000 INFO X: Registered with ResourceManager "
+                "as worker-a:8041 with total resource of "
+                "<memory:8192, vCores:8>\n"
+                "2026-01-01 00:00:01,000 INFO X: Start request for "
+                "container_1_0001_01_000002 with resource "
+                "<memory:2048, vCores:2>\n"
+                "2026-01-01 00:00:02,000 INFO X: Registered with ResourceManager "
+                "as worker-b:8041 with total resource of "
+                "<memory:16384, vCores:16>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertEqual("worker-a", container.node_id)
+        self.assertEqual(8192, container.node_memory_mb)
+        self.assertEqual(8, container.node_vcores)
+
+    def test_nodemanager_registration_preserves_existing_instance_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            path = log_dir / "hadoop-yarn.log"
+            path.write_text(
+                "2026-01-01 00:00:00,000 INFO RMNodeImpl: NodeManager from node "
+                "worker1(cmPort: 8041 httpPort: 8042) registered with capability: "
+                "<memory:8192, vCores:8> instanceType(STRING)=g4dn.4xlarge\n"
+                "2026-01-01 00:00:01,000 INFO X: Registered with ResourceManager "
+                "as worker1:8041 with total resource of <memory:8192, vCores:8>\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        self.assertEqual("g4dn.4xlarge", evidence.nodes["worker1"].instance_type)
+
+    def test_node_class_map_does_not_make_unregistered_host_complete(self):
+        container = self.container(
+            source="resourcemanager",
+            finish_source="resourcemanager",
+        )
+        node = core.Node(node_id="worker1")
+        evidence = core.YarnEvidence(
+            nodes={"worker1": node},
+            containers={container.container_id: container},
+            application_summaries={
+                "application_1_0001": core.ApplicationSummary(
+                    application_id="application_1_0001",
+                    name="test",
+                    final_status="SUCCEEDED",
+                    total_allocated_containers=1,
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            mapping = Path(directory) / "node-classes.json"
+            mapping.write_text(
+                json.dumps({"nodes": {"worker1": "onprem:worker-8"}}),
+                encoding="utf-8",
+            )
+            adapters.apply_node_class_map(evidence, mapping)
+
+        application = reporting.calculate_applications(
+            evidence,
+            "default",
+            {},
+            include_application_master=False,
+        )[0]
+        self.assertEqual("onprem:worker-8", node.node_class)
+        self.assertFalse(application["complete"])
+        self.assertTrue(
+            any("Node registration evidence is missing" in w for w in application["warnings"])
+        )
+
+    def test_resourcemanager_assignment_preserves_host_without_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "hadoop-yarn"
+            log_dir.mkdir()
+            path = log_dir / "hadoop-yarn-resourcemanager.log"
+            path.write_text(
+                "2026-01-01 00:00:01,000 INFO X: Assigned container "
+                "container_1_0001_01_000002 of capacity "
+                "<memory:2048, vCores:2, yarn.io/gpu:1> "
+                "on host worker1:8041\n",
+                encoding="utf-8",
+            )
+            evidence = core.parse_yarn_logs(log_dir)
+
+        node = evidence.nodes["worker1"]
+        container = evidence.containers["container_1_0001_01_000002"]
+        self.assertIsNone(node.memory_mb)
+        self.assertIsNone(node.vcores)
+        self.assertEqual({}, node.resources)
+        self.assertFalse(node.registered_with_rm)
+        self.assertEqual("worker1", container.node_id)
+        self.assertEqual(0, container.node_memory_mb)
+        self.assertEqual(0, container.node_vcores)
 
 
 class AdapterTest(unittest.TestCase):
