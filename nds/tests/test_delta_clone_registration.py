@@ -4,7 +4,9 @@
 
 import importlib.util
 from datetime import datetime
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -25,6 +27,28 @@ spec.loader.exec_module(nds_h_power)
 
 
 class DeltaCloneRegistrationTest(unittest.TestCase):
+    def test_delta_run_templates_forward_optional_warehouse_as_one_argument(self):
+        templates = ('power_run_cpu_delta.template', 'power_run_gpu_delta.template',
+                     'maintenance_delta.template')
+        for template in templates:
+            for warehouse in (None, 'hdfs://storage/clone warehouse'):
+                with self.subTest(template=template, warehouse=warehouse):
+                    environment = os.environ.copy()
+                    environment.pop('DELTA_CLONE_WAREHOUSE', None)
+                    if warehouse is not None:
+                        environment['DELTA_CLONE_WAREHOUSE'] = warehouse
+                    result = subprocess.run(
+                        ['bash', '-c', 'source "$1"; printf "%s\\0" "${SPARK_CONF[@]}"',
+                         'template-test', template], cwd=ROOT / 'nds', env=environment,
+                        check=True, capture_output=True, text=True)
+                    arguments = result.stdout.rstrip('\0').split('\0')
+                    settings = [arguments[index + 1] for index, argument in enumerate(arguments)
+                                if argument == '--conf']
+                    warehouses = [value for value in settings
+                                  if value.startswith('spark.sql.warehouse.dir=')]
+                    self.assertEqual(warehouses, [] if warehouse is None else
+                                     ['spark.sql.warehouse.dir=' + warehouse])
+
     def test_bundled_delta_templates_use_clone_capable_release(self):
         coordinate = 'io.delta:delta-core_2.12:2.3.0'
         template_names = (

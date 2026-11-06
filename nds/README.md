@@ -361,6 +361,21 @@ example `--conf spark.sql.warehouse.dir=hdfs:///benchmarks/delta-clones`.
 Maintenance writes new files there, rather than under the source Delta paths.
 The default local `./spark-warehouse` is suitable only for local testing.
 
+The bundled `power_run_cpu_delta.template`, `power_run_gpu_delta.template`, and
+`maintenance_delta.template` also accept `DELTA_CLONE_WAREHOUSE`:
+
+```bash
+export DELTA_CLONE_WAREHOUSE=hdfs:///benchmarks/delta-clones
+```
+
+Set the warehouse before the Spark application starts; an existing session's
+warehouse cannot be changed by a property-file override. Clone setup rejects a
+local-filesystem warehouse on non-local Spark masters before creating a database.
+For a single-host standalone test, or a `file:` directory mounted identically and
+readable/writable by the driver and every executor, explicitly pass
+`--conf spark.benchmarks.delta.allowLocalWarehouse=true` to acknowledge that layout.
+The check cannot verify remote storage permissions or mount visibility.
+
 These shallow-clone Delta runs require a classic Spark session. Spark Connect
 does not support the `newSession()` isolation they require; run them with
 `spark-submit` without `--spark_connect` or `SPARK_REMOTE`.

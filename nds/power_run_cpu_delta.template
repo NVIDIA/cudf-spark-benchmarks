@@ -33,3 +33,8 @@ export SPARK_CONF=("--master" "${SPARK_MASTER}"
                    "--conf" "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension"
                    "--conf" "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
                    "--jars" "$NDS_LISTENER_JAR")
+
+# Clone metadata and maintenance output must be visible to every executor.
+if [[ -n "${DELTA_CLONE_WAREHOUSE:-}" ]]; then
+    SPARK_CONF+=("--conf" "spark.sql.warehouse.dir=${DELTA_CLONE_WAREHOUSE}")
+fi

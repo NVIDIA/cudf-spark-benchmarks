@@ -224,6 +224,13 @@ object-store URI that the driver and every executor can read and write, for
 example `--conf spark.sql.warehouse.dir=hdfs:///benchmarks/delta-clones`.
 The default local `./spark-warehouse` is suitable only for local testing.
 
+Set this at application startup. Clone setup rejects a local-filesystem warehouse
+on non-local Spark masters before creating a database. For single-host standalone
+testing or an identically mounted `file:` directory, pass
+`--conf spark.benchmarks.delta.allowLocalWarehouse=true` only after verifying that
+the driver and every executor can read and write the same storage. The check
+cannot verify remote storage permissions or mount visibility.
+
 These shallow-clone Delta runs require a classic Spark session. Spark Connect
 does not support the `newSession()` isolation they require; run them with
 `spark-submit` without `--spark_connect` or `SPARK_REMOTE`.
