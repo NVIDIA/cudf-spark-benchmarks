@@ -402,7 +402,9 @@ including NULL partitions; dimensions remain complete. Cutoff catalog loading
 requires fresh table names in the current database.
 
 Query times and `Power Test Time` exclude analysis; `Total Time` includes it.
-Analysis adds no timing CSV rows. With `--json_summary_folder`, total and
+Analysis costs are not added to the timing CSV. Power reports produced with active
+analysis are ineligible for the whole-benchmark metric; see
+[Power timing and metric inputs](#power-timing-and-metric-inputs). With `--json_summary_folder`, total and
 per-table analysis costs are written separately to `statistics/analyze-cost.json`.
 A summary folder is optional. Preparing a reused NDS summary folder removes the previous
 analysis-cost file, including when analysis is disabled.
@@ -742,6 +744,35 @@ Please note: each part of the benchmark will produce its report file for necessa
 execution time, start or end timestamp. The final metrics are calculated by those reports. Skipping
 a part of the benchmark may cause metrics calculation failure in the end if there's no necessary reports
 generated previously.
+
+### Power timing and metric inputs
+
+Power timing follows the event and precision requirements of [TPC-DS 3.2.0](https://www.tpc.org/tpc_documents_current_versions/pdf/tpc-ds_v3.2.0.pdf), the version currently used by the NDS toolkit. This timing contract is not TPC certification. NDS results remain subject to the repository's TPC disclaimer, and full benchmark timing still has the outstanding corrections in [#297](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/297). Adoption of TPC-DS 4.0 is tracked separately in [#260](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/260).
+
+For a complete query stream, `Power Start Time` is recorded immediately before the first `spark.sql` submission and `Power End Time` immediately after the last result is collected by the driver. The interval includes query submission, planning, result transfer and the gaps between queries. The final query's report writing and profiler teardown, plus Spark shutdown, follow the last-result endpoint. Per-query driver timings and Spark SQL engine timings are separate diagnostics; neither their sum nor the job's `Total Time` replaces this continuous interval.
+
+Endpoints retain fractional epoch seconds. A monotonic clock measures elapsed time; reports are ineligible if the epoch span and monotonic duration differ by more than 1 ms, allowing for clock-read overhead. The whole-benchmark consumer converts durations to seconds and rounds upward to 0.1 second after subtraction using decimal arithmetic: a 0.25-second interval contributes 0.3 seconds. Timestamp rows are epoch seconds even though the historical CSV column header is `time/milliseconds`; the duration rows use milliseconds.
+
+Each new Power CSV carries numeric rows `NDS Timing Version` (1), `NDS Metric Eligible` (1 for eligible, 0 otherwise) and `Query Stream`. `nds_bench.py` checks this metadata for Power and throughput stream reports, including reports reused through `skip`. Reports without the current contract, with the wrong stream number, or marked ineligible are rejected. Rerun those phases with the current runner; adding metadata to an old CSV cannot recover lost precision or prove its execution mode.
+
+The accepted Power path runs the complete generated Stream 0 once, without warmups, and collects all query results successfully. Stream structure is checked against the 99 templates, including the two statements in each of queries 14, 23, 24 and 39, and Stream 0's Appendix D order. Throughput reports must identify the expected generated stream and have complete stream structure. The caller remains responsible for using the generator's prescribed throughput ordering, valid SQL, the correct dataset and the intended runtime; report metadata does not establish those properties.
+
+Standalone diagnostic and extended workloads remain available. Their reports are ineligible for the whole-benchmark metric when they use query subsets, warmups or repetitions, skipped execution, result-file output, profiling hooks, saved plans, custom or cutoff datasets, per-query setup/cleanup, Spark Connect or unmanaged Delta clone runs. Unsupported query variants are also kept outside metric consumption. The setup/cleanup deductions introduced by [#224](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/224) remain a diagnostic convention for extended workloads; those deductions use the same SQL-submit/result-receipt events as the enclosing timer, excluding trailing plan/profiler work. This is not permission to subtract required work from a specification-defined interval. Repeated extended-query ordering remains tracked by [#232](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/232).
+
+Explicit statistics collection during a Power job (`--analyze table`, `--analyze all_columns` or legacy `--analyze_tables`) also makes its report ineligible for the composite metric. Statistics belong in Load, completed before the Load endpoint used to generate the query seed. Such Power reports cannot be made suitable by adding an ANALYZE duration to an old Load report: its endpoint and query seed would remain stale. The full driver does not currently support this combined statistics workflow. Until a Load workflow performs and records that preparation before generating streams, use these analysis modes only for standalone diagnostics. Do not use Power `Total Time` as a substitute or silently omit the cost.
+
+| Quantity and source | Specification requirement | Current accounting and limits |
+| --- | --- | --- |
+| `TPower`: `nds_power.py` endpoints, consumed by `nds_bench.py` | §7.4.5.1: first submission through final result receipt | Continuous driver interval; required report eligibility, precision and stream checks. |
+| Power timestamps and elapsed rounding | §7.1.15–16: subsecond timestamps; elapsed seconds rounded upward to 0.1 second | Fractional endpoints are preserved; rounding occurs in metric consumption. |
+| Query stream | §7.1.4, §7.1.10, §7.4.4 and Appendix D | One complete stream in one session; structural checks and Stream 0 ordering do not certify query semantics. |
+| Per-query report | §7.4.7.1–2: query submission through output receipt and disclosed durations | Driver-side diagnostics; engine-only durations are separate ([#245](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/245)). |
+| `TLoad`: `nds_transcode.py` Load report | §7.2.9, §7.4.3.7.1: database preparation includes requested statistics | Power-time ANALYZE reports are rejected; statistics must be accounted for during Load. |
+| `Ttt1`, `Ttt2`: throughput stream endpoints | §7.4.7: phase-specific start and end events | Current report precision and eligibility apply; the shared Maintenance 1/Throughput 2 boundary remains tracked by #297. |
+| `Tdm1`, `Tdm2`: maintenance reports | §7.4.9: first applicable refresh start through final refresh end | Refresh-input and inter-refresh boundary corrections remain tracked by #297. |
+| Final metric: `get_perf_metric()` | §7.6.3.1: phase inputs and unit conversion | Consumes rounded seconds; conversion to hours and fourth-root arithmetic do not correct erroneous phase inputs. |
+
+Historical Power reports and scores using whole-second endpoints or different boundaries are not directly interchangeable with corrected results. Rerun measurements using the same runner revision, timing contract and supported options for comparisons. A score change caused by accounting corrections is not evidence of a system speedup; #297 must also be addressed before asserting alignment of all full-benchmark phase timings.
 
 Example command to run the benchmark:
 

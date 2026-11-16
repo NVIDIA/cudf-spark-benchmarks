@@ -238,8 +238,12 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                     with Path(options['time_log_output_path']).open() as stream:
                         rows = list(csv.DictReader(stream))
                     values = {row['query']: float(row['time/milliseconds']) for row in rows}
-                    self.assertEqual(values['Power Test Time'], 10000)
-                    self.assertEqual(values['Total Time'], 50000)
+                    # Empty NDS streams now have no query-event interval. The
+                    # NDS-H driver retains its existing outer-loop timer.
+                    self.assertEqual(values['Power Test Time'], 0 if folder == 'nds' else 10000)
+                    self.assertEqual(values['Total Time'], 30000 if folder == 'nds' else 50000)
+                    if folder == 'nds':
+                        self.assertEqual(values['NDS Metric Eligible'], 0)
                     self.assertNotIn('Statistics Time', values)
                     if expected_rows is None:
                         expected_rows = rows

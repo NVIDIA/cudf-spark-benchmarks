@@ -46,6 +46,7 @@ from pyspark.sql import DataFrame
 
 from check import check_json_summary_folder, check_query_subset_exists, check_version
 from nds_schema import get_schemas
+from power_timing import QueryTimer, TIMING_VERSION, stream_number
 
 from setup_utils import add_utils_to_sys_path
 add_utils_to_sys_path()
@@ -550,16 +551,23 @@ def run_one_query(spark_session,
                   output_format,
                   save_plan_path,
                   plan_types,
-                  skip_execution):
+                  skip_execution,
+                  timer=None):
     with profiler(query_name=query_name):
         print(f"Running query {query_name}")
-        df = spark_session.sql(query)
-        if not skip_execution:
-            if not output_path:
-                df.collect()
-            else:
-                ensure_valid_column_names(df).write.format(output_format).mode('overwrite').save(
-                        output_path + '/' + query_name)
+        if timer is not None:
+            timer.start()
+        try:
+            df = spark_session.sql(query)
+            if not skip_execution:
+                if not output_path:
+                    df.collect()
+                else:
+                    ensure_valid_column_names(df).write.format(output_format).mode('overwrite').save(
+                            output_path + '/' + query_name)
+        finally:
+            if timer is not None:
+                timer.finish()
         if save_plan_path:
             os.makedirs(save_plan_path, exist_ok=True)
             explain_str = spark_session._jvm.PythonSQLUtils.explainString(df._jdf.queryExecution(), 'extended')
@@ -699,6 +707,8 @@ def run_query_stream(input_prefix,
                                     hive_external or spark_connect):
         raise ValueError('--cutoff_date requires file-backed inputs '
                          'and a classic Spark session (not Spark Connect)')
+    if warmup_iterations < 0 or iterations < 1:
+        raise ValueError('warmup_iterations must be nonnegative and iterations must be positive')
     queries_reports = []
     execution_time_list = []
     total_time_start = time.time()
@@ -763,8 +773,15 @@ def run_query_stream(input_prefix,
         # Setup profiler
         profiler = Profiler(profiling_hook=profiling_hook, output_root=json_summary_folder)
 
-        # Run query
-        power_start = int(time.time())
+        # Extended standalone runs retain their diagnostic times, but cannot
+        # silently feed the full benchmark score (including reused CSV reports).
+        query_stream = stream_number(query_dict)
+        metric_eligible = (query_stream >= 0 and warmup_iterations == 0 and iterations == 1
+                           and not any((sub_queries, sub_query_patterns, skip_execution,
+                                        output_path, profiling_hook, save_plan_path,
+                                        analyze_tables, analyze, dataset_manifest, cutoff_date,
+                                        delta_unmanaged, spark_connect)))
+        timer = QueryTimer()
         setup_time = 0
         cleanup_time = 0
 
@@ -777,6 +794,7 @@ def run_query_stream(input_prefix,
             # Determine query type
             query_type = get_query_type(query_name)
 
+            query_work_start = timer.work_ms
             summary = q_report.report_on(run_one_query, warmup_iterations,
                                          iterations,
                                          spark_session,
@@ -787,17 +805,20 @@ def run_query_stream(input_prefix,
                                          output_format,
                                          save_plan_path,
                                          plan_types,
-                                         skip_execution)
+                                         skip_execution,
+                                         timer)
             print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
             query_times = summary['queryTimes']
             for query_time in query_times:
                 execution_time_list.append((spark_app_id, query_name, query_time))
 
-                # Accumulate setup and cleanup times
-                if query_type == 'setup':
-                    setup_time += query_time
-                elif query_type == 'cleanup':
-                    cleanup_time += query_time
+            # Deductions must use the same SQL-submit/result-receipt events as
+            # the enclosing interval, excluding the final profiler/plan tail.
+            query_work_ms = timer.work_ms - query_work_start
+            if query_type == 'setup':
+                setup_time += query_work_ms
+            elif query_type == 'cleanup':
+                cleanup_time += query_work_ms
 
             queries_reports.append(q_report)
             if json_summary_folder:
@@ -813,8 +834,12 @@ def run_query_stream(input_prefix,
                     summary_prefix = os.path.join(json_summary_folder, '')
                 q_report.write_summary(prefix=summary_prefix)
         clearQueryName(spark_session)
-        power_end = int(time.time())
-        power_elapse = int((power_end - power_start)*1000)
+        power_start = timer.start_seconds
+        power_end = timer.end_seconds
+        power_elapse = timer.elapsed_ms
+        metric_eligible = (metric_eligible and timer.clock_consistent and bool(queries_reports) and
+                           all(report.summary['queryStatus'] == ['Completed']
+                               for report in queries_reports))
 
         # Calculate Power Test Time (excluding setup and cleanup)
         power_test_time = power_elapse - setup_time - cleanup_time
@@ -834,6 +859,15 @@ def run_query_stream(input_prefix,
     if cleanup_time > 0:
         print("====== Power Cleanup Time: {} milliseconds ======".format(cleanup_time))
     print("====== Total Time: {} milliseconds ======".format(total_elapse))
+    if not metric_eligible:
+        print('This standalone report is not eligible for the full NDS metric: '
+              'use a complete generated stream and default execution options; '
+              'explicit statistics belong in Load before its end time/RNG seed.')
+    execution_time_list.extend([
+        (spark_app_id, "NDS Timing Version", TIMING_VERSION),
+        (spark_app_id, "NDS Metric Eligible", int(metric_eligible)),
+        (spark_app_id, "Query Stream", query_stream),
+    ])
     execution_time_list.append(
         (spark_app_id, "Power Start Time", power_start))
     execution_time_list.append(
@@ -862,7 +896,12 @@ def run_query_stream(input_prefix,
     # write to csv in cloud environment
     if extra_time_log_output_path:
         spark_session = SparkSession.builder.getOrCreate()
-        time_df = spark_session.createDataFrame(data=execution_time_list, schema = header)
+        # CSV values mix fractional durations/epochs with integer metadata.
+        # Use the same string representation as the local csv.writer rather
+        # than asking Spark to merge LongType and DoubleType.
+        time_df = spark_session.createDataFrame(
+            data=[tuple(str(value) for value in row) for row in execution_time_list],
+            schema=header)
         time_df.coalesce(1).write.csv(extra_time_log_output_path)
 
     # check queries_reports, if there's any task or query failed, exit a non-zero to represent the script failure
