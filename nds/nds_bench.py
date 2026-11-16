@@ -42,9 +42,9 @@
 # 7. run nds_maintenance.py to do Maintenance Test 2. => get "Tdm2"
 
 import argparse
+from decimal import Decimal, ROUND_CEILING
 import subprocess
 import yaml
-from power_timing import read_score_report, round_seconds
 
 
 def get_yaml_params(yaml_file):
@@ -90,8 +90,18 @@ def get_load_time(load_report_file):
 
 
 def get_power_time(power_report_file):
-    """Read eligible Stream 0 duration in milliseconds, retaining decimal precision."""
-    return read_score_report(power_report_file, 0)['Power Test Time']
+    """get the total elapse time for Power Test in str format from the power report file"""
+    power_elapse = None
+    with open(power_report_file, "r") as f:
+        for line in f:
+            if "Power Test Time" in line:
+                # e.g. "app-20220715143743-0007,Power Test Time,11838"
+                power_elapse = line.split(",")[2].strip()
+    if power_elapse:
+        return power_elapse
+    else:
+        raise Exception(
+            f"Power Test Time not found in Power Test report file: {power_report_file}.")
 
 
 def get_start_end_time(report_file):
@@ -167,9 +177,9 @@ def get_throughput_time(throughput_report_file_base, num_streams, first_or_secon
     stream_range = get_stream_range(num_streams, first_or_second)
     for stream_num in stream_range:
         report_file = throughput_report_file_base + f"_{stream_num}.csv"
-        report = read_score_report(report_file, stream_num)
-        start_time.append(report['Power Start Time'])
-        end_time.append(report['Power End Time'])
+        sub_start_time, sub_end_time = get_start_end_time(report_file)
+        start_time.append(Decimal(sub_start_time))
+        end_time.append(Decimal(sub_end_time))
     start_time = min(start_time)
     end_time = max(end_time)
     elapse = round_up_to_nearest_10_percent(end_time - start_time)
@@ -224,7 +234,7 @@ def get_throughput_stream_nums(num_streams, first_or_second):
 
 
 def round_up_to_nearest_10_percent(num):
-    return round_seconds(num)
+    return float(Decimal(str(num)).quantize(Decimal('0.1'), rounding=ROUND_CEILING))
 
 
 def run_data_gen(scale_factor, parallel, data_path, local_or_hdfs, num_streams):
@@ -385,10 +395,6 @@ def write_metrics_report(report_path, metrics_map):
 
 
 def run_full_bench(yaml_params):
-    if yaml_params['power_test']['output_path']:
-        raise ValueError('Whole-benchmark scoring requires driver result collection; '
-                         'power_test.output_path must be empty. Use nds_power.py '
-                         'for standalone result-file runs.')
     skip_data_gen = yaml_params['data_gen']['skip']
     scale_factor = str(yaml_params['data_gen']['scale_factor'])
     parallel = str(yaml_params['data_gen']['parallel'])
@@ -422,14 +428,6 @@ def run_full_bench(yaml_params):
     maintenance_report_base_path = yaml_params['maintenance_test']['maintenance_report_base_path']
     metrics_report = yaml_params['metrics_report_path']
 
-    # Validate reused query reports before starting any expensive subprocesses.
-    if skip_power_test:
-        get_power_time(power_report_path)
-    if skip_throughput_test:
-        for test in (1, 2):
-            for stream in get_stream_range(num_streams, test):
-                read_score_report(f'{throughput_report_base}_{stream}.csv', stream)
-
     # 0.
     if not skip_data_gen:
         run_data_gen(scale_factor, parallel, raw_data_path,
@@ -462,7 +460,7 @@ def run_full_bench(yaml_params):
     # But Spec 7.1.16: Elapsed time is measured in seconds rounded up to the nearest 0.1 second.
     # Convert it to seconds.
     TPower = round_up_to_nearest_10_percent(
-        get_power_time(power_report_path) / 1000)
+        Decimal(get_power_time(power_report_path)) / 1000)
 
     # 4.
     if not skip_throughput_test:
