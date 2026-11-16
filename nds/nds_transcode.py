@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -52,6 +52,36 @@ TABLE_PARTITIONING = {
     'web_returns': 'wr_returned_date_sk'
 }
 
+# Apply these properties at table creation, before Iceberg opens any writers.
+ICEBERG_PARQUET_PROPERTIES = {
+    # Match the reference Iceberg warehouse's metadata format.
+    'format-version': '2',
+    # Match the comparison Parquet dataset's codec; --compression still overrides it.
+    'write.parquet.compression-codec': 'snappy',
+    # Match the comparison Parquet writer's row-group size target.
+    'write.parquet.row-group-size-bytes': str(128 * 1024 * 1024),
+    # Parquet 1.16 flushes at 90% of the page target. ceil(1 MiB / 0.9)
+    # approaches the effective 1 MiB target of the older comparison files.
+    'write.parquet.page-size-bytes': '1165085',
+    # Match the reference files' V1 data pages.
+    'write.parquet.page-version': 'v1',
+    # Let page bytes govern flushing instead of Iceberg's 20,000-row cap.
+    'write.parquet.page-row-limit': str(2**31 - 1),
+    # Match the Parquet dictionary budget and reduce encoding-fallback differences.
+    'write.parquet.dict-size-bytes': str(1024 * 1024),
+    # Keep the minimum size-check interval at 100 records.
+    'write.parquet.row-group-check-min-record-count': '100',
+    # Also cap adaptive checks at 100 records to reduce boundary overshoot.
+    'write.parquet.row-group-check-max-record-count': '100',
+    # Enable dictionary encoding as in the reference Parquet writer.
+    'parquet.enable.dictionary': 'true',
+    # Avoid rolling each benchmark partition into many small files. This is
+    # a target, not a requirement to buffer 32 GiB in memory.
+    'write.target-file-size-bytes': str(32 * 1024**3),
+    # store() already repartitions and sorts; avoid another Iceberg shuffle.
+    'write.distribution-mode': 'none',
+}
+
 
 def load(session, filename, schema, input_format, delimiter="|", header="false", prefix=""):
     data_path = prefix + '/' + filename
@@ -89,6 +119,11 @@ def store(session,
         prefix (str): output data path when not using Iceberg.
     """
     if output_format == "iceberg":
+        properties = {'write.format.default': iceberg_write_format}
+        if iceberg_write_format == 'parquet':
+            properties.update(ICEBERG_PARQUET_PROPERTIES)
+        if compression and iceberg_write_format in ('parquet', 'avro'):
+            properties[f'write.{iceberg_write_format}.compression-codec'] = compression
         if output_mode == 'overwrite':
             session.sql(f"drop table if exists {filename}")
         CTAS = f"create table {filename} using iceberg "
@@ -99,14 +134,8 @@ def store(session,
            CTAS += f"partitioned by ({TABLE_PARTITIONING[filename]})"
         else:
             df.coalesce(1).createOrReplaceTempView("temptbl")
-        CTAS += f" tblproperties('write.format.default' = '{iceberg_write_format}'"
-        # Iceberg now only support compression codec option for Parquet and Avro write.
-        if compression:
-            if iceberg_write_format == "parquet":
-                CTAS += f", 'write.parquet.compression-codec' = '{compression}'"
-            elif iceberg_write_format == "avro":
-                CTAS += f", 'write.avro.compression-codec' = '{compression}'"
-        CTAS += ")"
+        CTAS += " tblproperties(" + ', '.join(
+            f"'{key}' = '{value}'" for key, value in sorted(properties.items())) + ")"
         CTAS += " as select * from temptbl"
         session.sql(CTAS)
     elif output_format == "delta" and not delta_unmanaged:
@@ -294,7 +323,7 @@ if __name__ == "__main__":
         ' for supported codecs in Iceberg.' +
         ' See https://spark.apache.org/docs/latest/sql-data-sources.html' +
         ' for supported codecs for Spark built-in formats.' +
-        ' When not specified, the default for the requested output format will be used.'
+        ' Iceberg Parquet defaults to snappy; other formats use their writer default.'
     )
     parser.add_argument(
         '--delta_unmanaged',
