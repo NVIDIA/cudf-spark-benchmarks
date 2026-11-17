@@ -745,16 +745,16 @@ execution time, start or end timestamp. The final metrics are calculated by thos
 a part of the benchmark may cause metrics calculation failure in the end if there's no necessary reports
 generated previously.
 
-Timing follows [TPC-DS 3.2.0](https://www.tpc.org/tpc_documents_current_versions/pdf/tpc-ds_v3.2.0.pdf):
+NDS records benchmark time as follows:
 
 | Measurement | Boundary and accounting |
 | --- | --- |
-| Power (§7.4.5.1) | First SQL submission through the final result received by the driver; includes inter-query work, excludes final reporting/profiling and shutdown. |
-| Maintenance (§7.4.9.1, §7.4.9.3–4) | Starts before reading refresh inputs; each test spans its first refresh start through its final SQL result, including all intervening process/report/launch gaps. |
-| Throughput 1 (§7.4.7.4–5) | First stream submission through the last stream's final result. |
-| Throughput 2 (§7.4.7.7–8) | Starts at the exact persisted Maintenance 1 end, including the following teardown/report/launch transition, and ends at the last stream's final result. |
-| Load statistics (§7.2.9, §7.4.3.7.1) | Explicit ANALYZE runs inside Load, before its end timestamp and query seed; its cost enters the Load report once. |
-| Precision (§7.1.15–16) | Keep fractional timestamps, subtract first, then round elapsed seconds upward to 0.1 second in metric consumption. |
+| Power | First SQL submission through the final result received by the driver; includes inter-query work, excludes final reporting/profiling and shutdown. |
+| Maintenance | Starts before reading refresh inputs; each test spans its first refresh start through its final SQL result, including all intervening process/report/launch gaps. |
+| Throughput 1 | First stream submission through the last stream's final result. |
+| Throughput 2 | Starts at the exact persisted Maintenance 1 end, including the following teardown/report/launch transition, and ends at the last stream's final result. |
+| Load statistics | Explicit ANALYZE runs inside Load, before its end timestamp and query seed; its cost enters the Load report once. |
+| Precision | Keep fractional timestamps, subtract first, then round elapsed seconds upward to 0.1 second in metric consumption. |
 
 Use `nds_transcode.py --analyze table|all_columns --hive` to collect statistics
 on persistent file-backed catalog tables during Load. Its end timestamp and
@@ -776,10 +776,9 @@ clones and Connect runs remain available. Their CSVs are marked
 `Power Run Is Metric Compatible=0` and cannot feed the full benchmark metric,
 including through skipped phases. Tagged setup/cleanup runs retain their
 standalone diagnostic deductions (#224); such deductions cannot exclude required
-SQL from a scored query (§7.4.7.1). The scored path uses a complete generated
+SQL from a scored query. The scored path uses a complete generated
 stream once in one session and includes the whole driver interval, rather than
-summing engine-event durations (#245). Generate streams with the matching
-TPC-DS toolkit; these timing checks do not certify SQL semantics or query order.
+summing engine-event durations (#245).
 
 Maintenance reports persist explicit epoch endpoints so the shared Throughput 2
 boundary is independent of the reader's local timezone. Their numeric
@@ -789,9 +788,8 @@ new maintenance endpoints or query compatibility marker must be regenerated;
 old timings/scores are not directly comparable. Unsupported or failed query
 streams cannot silently produce a full score. These changes address the timing
 inputs in [#297](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/297) and
-[#304](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/304); they do not
-establish TPC certification. TPC-DS 4.0 support remains in #260. The existing
-metric still converts rounded phase seconds to hours before its fourth root.
+[#304](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/304). The metric
+converts rounded phase seconds to hours before its fourth root.
 
 Example command to run the benchmark:
 
