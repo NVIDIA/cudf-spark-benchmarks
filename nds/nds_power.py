@@ -771,6 +771,18 @@ def run_query_stream(input_prefix,
         if sub_query_patterns:
             query_dict = get_query_subset_by_pattern(query_dict, sub_query_patterns)
 
+        # These standalone extensions change the specification's scored stream
+        # or subtract work. Preserve them, but do not silently score their CSVs.
+        split_queries = (14, 23, 24, 39)
+        expected_queries = ({f'query{i}' for i in range(1, 100) if i not in split_queries} |
+                            {f'query{i}_part{part}' for i in split_queries for part in (1, 2)})
+        metric_compatible = (set(query_dict) == expected_queries and
+                             warmup_iterations == 0 and iterations == 1 and
+                             not any((sub_queries, sub_query_patterns, skip_execution,
+                                      output_path, profiling_hook, save_plan_path,
+                                      analyze_tables, analyze, dataset_manifest, cutoff_date,
+                                      spark_connect, delta_unmanaged)))
+
         # Setup profiler
         profiler = Profiler(profiling_hook=profiling_hook, output_root=json_summary_folder)
 
@@ -856,6 +868,11 @@ def run_query_stream(input_prefix,
     if cleanup_time > 0:
         print("====== Power Cleanup Time: {} milliseconds ======".format(cleanup_time))
     print("====== Total Time: {} milliseconds ======".format(total_elapse))
+    metric_compatible = (metric_compatible and bool(queries_reports) and
+                         all(report.summary['queryStatus'] == ['Completed']
+                             for report in queries_reports))
+    execution_time_list.append(
+        (spark_app_id, 'Power Run Is Metric Compatible', int(metric_compatible)))
     execution_time_list.append(
         (spark_app_id, "Power Start Time", power_start))
     execution_time_list.append(

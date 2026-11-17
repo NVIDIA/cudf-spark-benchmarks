@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,6 +40,10 @@ from datetime import datetime
 from pyspark.sql.types import *
 from pyspark.sql.functions import col
 from nds_schema import *
+from setup_utils import add_utils_to_sys_path
+
+add_utils_to_sys_path()
+from benchmark_statistics import analyze_table
 
 # Note the specific partitioning is applied when save the parquet data files.
 TABLE_PARTITIONING = {
@@ -152,6 +156,15 @@ def store(session,
                 writer.saveAsTable(filename, path=data_path)
 
 def transcode(args):
+    analyze = getattr(args, 'analyze', None)
+    if analyze == 'none':
+        analyze = None
+    if analyze is not None:
+        if analyze not in ('table', 'all_columns'):
+            raise ValueError('--analyze must be none, table, or all_columns')
+        if not args.hive or args.output_format in ('iceberg', 'delta'):
+            raise ValueError('--analyze requires --hive file-backed catalog tables; '
+                             'Delta, Iceberg and path-only outputs are unsupported')
     session_builder = pyspark.sql.SparkSession.builder
     if args.output_format == "iceberg":
         session_builder.config("spark.sql.catalog.spark_catalog.warehouse", args.output_prefix)
@@ -201,6 +214,10 @@ def transcode(args):
                           args.delta_unmanaged,
                           args.hive),
             number=1)
+        if analyze is not None:
+            # Statistics prepare the database for queries: include their cost
+            # before the Load endpoint that also determines the query seed.
+            analyze_table(session, analyze, fn)
 
     end_time = datetime.now()
     delta = (end_time - start_time).total_seconds()
@@ -212,6 +229,7 @@ def transcode(args):
 
     report_text = ""
     report_text += f"Load Test Time: {delta} seconds\n"
+    report_text += f"Load Statistics Mode: {analyze or 'none'}\n"
     report_text += f"Load Test Finished at: {end_time}\n"
     report_text += f"RNGSEED used: {end_time_formatted}\n"
 
@@ -264,6 +282,12 @@ if __name__ == "__main__":
         default='parquet',
         help="output data format when converting CSV data sources."
     )
+    parser.add_argument(
+        '--analyze',
+        choices=['none', 'table', 'all_columns'],
+        default='none',
+        help='Collect statistics during Load, before its end time and query seed. '
+             'Requires --hive file-backed catalog tables; not supported for Delta or Iceberg.')
     parser.add_argument(
         '--tables',
         type=lambda s: s.split(','),

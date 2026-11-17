@@ -29,6 +29,7 @@ load_test:
   output_path: PATH_FOR_ICEBERG_OR_DELTA_WAREHOUSE # warehouse location for Iceberg or DeltaLake
   warehouse_type: iceberg # support "iceberg" and "delta", use "iceberg" by default
   report_path: load_test.txt # execution report path
+  analyze: none # match Load Statistics Mode when reusing an analyzed Load report
   skip: false
 generate_query_stream:
   # how many streams to be generated including the stream for Power Test
