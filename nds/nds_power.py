@@ -50,7 +50,7 @@ from nds_schema import get_schemas
 from setup_utils import add_utils_to_sys_path
 add_utils_to_sys_path()
 from delta_clone import DeltaCloneScope, new_run_session
-from spark_utils import setQueryName, clearQueryName
+from spark_utils import setQueryName, clearQueryName, is_connect_session
 from profiler import Profiler
 from benchmark_statistics import (analyze_table, analyze_catalog, clear_statistics_summary,
                                   require_fresh_catalog_tables)
@@ -542,6 +542,13 @@ def parse_explain_str(explain_str):
     return plan_dict
 
 
+def _wall_time_ns():
+    if hasattr(time, 'time_ns'):
+        return time.time_ns()
+    # Python 3.6 exposes wall-clock timestamps in seconds only.
+    return int(time.time() * 1_000_000_000)
+
+
 def run_one_query(spark_session,
                   profiler,
                   query,
@@ -554,7 +561,7 @@ def run_one_query(spark_session,
                   query_timing=None):
     with profiler(query_name=query_name):
         print(f"Running query {query_name}")
-        query_start = time.time_ns()
+        query_start = _wall_time_ns()
         if query_timing is not None:
             query_timing.setdefault('start_ns', query_start)
         try:
@@ -567,7 +574,7 @@ def run_one_query(spark_session,
                             output_path + '/' + query_name)
         finally:
             if query_timing is not None:
-                query_end = time.time_ns()
+                query_end = _wall_time_ns()
                 query_timing['end_ns'] = query_end
                 query_timing['query_ns'] = (query_timing.get('query_ns', 0) +
                                             query_end - query_start)
@@ -777,6 +784,7 @@ def run_query_stream(input_prefix,
         expected_queries = ({f'query{i}' for i in range(1, 100) if i not in split_queries} |
                             {f'query{i}_part{part}' for i in split_queries for part in (1, 2)})
         metric_compatible = (set(query_dict) == expected_queries and
+                             not is_connect_session(spark_session) and
                              warmup_iterations == 0 and iterations == 1 and
                              not any((sub_queries, sub_query_patterns, skip_execution,
                                       output_path, profiling_hook, save_plan_path,

@@ -5,6 +5,8 @@
 import logging
 import uuid
 
+from spark_utils import is_connect_session
+
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +19,7 @@ def new_run_session(spark_session, spark_properties):
     then apply the property file. Warn about immutable settings instead of
     trying to reset startup values that Spark may have normalized.
     """
-    # Inspect already-loaded classes so classic Spark never imports optional
-    # Connect dependencies. Include base classes to recognize Connect subclasses.
-    if any(cls.__module__ == 'pyspark.sql.connect.session'
-           for cls in type(spark_session).__mro__):
+    if is_connect_session(spark_session):
         raise ValueError(
             "Delta shallow-clone runs require a classic Spark session: "
             "Spark Connect does not support newSession() isolation. "

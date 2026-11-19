@@ -34,6 +34,12 @@ Utility functions for Spark benchmarks.
 """
 
 
+def is_connect_session(spark_session):
+    # Inspect the session's base classes without importing optional Connect dependencies.
+    return any(cls.__module__ == 'pyspark.sql.connect.session'
+               for cls in type(spark_session).__mro__)
+
+
 def setQueryName(spark_session, query_name):
     """Set the query name for display in Spark UI SQL tab.
     

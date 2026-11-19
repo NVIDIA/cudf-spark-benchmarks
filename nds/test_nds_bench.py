@@ -109,12 +109,12 @@ class NdsBenchRefreshRunTest(unittest.TestCase):
             with self.subTest(test_number=test_number):
                 mock_get_interval.reset_mock()
                 mock_get_interval.side_effect = [(Decimal('0'), Decimal('1.01')),
-                                                      (Decimal('1.01'), Decimal('3.02'))]
+                                                 (Decimal('2.01'), Decimal('4.02'))]
 
                 result = nds_bench.get_maintenance_time(
                     "/reports/maintenance", 9, test_number)
 
-                self.assertEqual(3.1, result)
+                self.assertEqual(4.1, result)
                 self.assertEqual(
                     [call(f"/reports/maintenance_{i}.csv") for i in refresh_numbers],
                     mock_get_interval.call_args_list)

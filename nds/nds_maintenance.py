@@ -259,8 +259,6 @@ def run_query(spark_session,
                                          query_name,
                                          warehouse_type,
                                          query_timing)
-            if not q_report.is_success():
-                raise RuntimeError(f"Data maintenance query failed: {query_name}")
             print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
             execution_time_list.append((spark_app_id, query_name, summary['queryTimes']))
             if json_summary_folder:
@@ -271,6 +269,8 @@ def run_query(spark_session,
                 else:
                     summary_prefix = os.path.join(json_summary_folder, '')
                 q_report.write_summary(prefix=summary_prefix)
+            if not q_report.is_success():
+                raise RuntimeError(f"Data maintenance query failed: {query_name}")
         # Take the last SQL result event, before trailing reporting or cleanup.
         DM_end = query_timing['end'] if query_timing else datetime.now()
         clearQueryName(spark_session)
