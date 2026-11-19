@@ -199,7 +199,7 @@ def run_subquery_for_delta(spark_session, delete_query):
         return final_query
 
 
-def run_dm_query(spark, query_list, query_name, warehouse_type):
+def run_dm_query(spark, query_list, query_name, warehouse_type, query_timing=None):
     """Run data maintenance query.
     For delete queries, they can run on Spark 3.2.2 but not Spark 3.2.1
     See: https://issues.apache.org/jira/browse/SPARK-39454
@@ -213,7 +213,9 @@ def run_dm_query(spark, query_list, query_name, warehouse_type):
     for q in query_list:
         if query_name in DELETE_FUNCS + INVENTORY_DELETE_FUNC and warehouse_type == "delta":
             q = run_subquery_for_delta(spark, q)
-        spark.sql(q)
+        spark.sql(q).collect()
+        if query_timing is not None:
+            query_timing['end'] = datetime.now()
 
 def run_query(spark_session,
               query_dict,
@@ -238,6 +240,14 @@ def run_query(spark_session,
         # Clone creation is run isolation rather than refresh DML. Keep it out of the scored
         # maintenance interval and account for the complete clone lifecycle in Total Time.
         DM_start = datetime.now()
+        metric_compatible = callable(query_dict) and not delta_unmanaged
+        # The CLI defers refresh-view registration and control-data reads so
+        # they belong to the same interval as the maintenance statements.
+        if callable(query_dict):
+            query_dict = query_dict()
+        metric_compatible = (metric_compatible and
+                             set(query_dict) == set(INSERT_FUNCS + DELETE_FUNCS + INVENTORY_DELETE_FUNC))
+        query_timing = {}
         for query_name, q_content in query_dict.items():
             # show query name in Spark web UI
             setQueryName(spark_session, query_name)
@@ -247,7 +257,8 @@ def run_query(spark_session,
                                          spark_session,
                                          q_content,
                                          query_name,
-                                         warehouse_type)
+                                         warehouse_type,
+                                         query_timing)
             print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
             execution_time_list.append((spark_app_id, query_name, summary['queryTimes']))
             if json_summary_folder:
@@ -258,8 +269,11 @@ def run_query(spark_session,
                 else:
                     summary_prefix = os.path.join(json_summary_folder, '')
                 q_report.write_summary(prefix=summary_prefix)
+            if not q_report.is_success():
+                raise RuntimeError(f"Data maintenance query failed: {query_name}")
+        # Take the last SQL result event, before trailing reporting or cleanup.
+        DM_end = query_timing['end'] if query_timing else datetime.now()
         clearQueryName(spark_session)
-        DM_end = datetime.now()
     finally:
         try:
             if delta_clone_scope is not None:
@@ -280,6 +294,13 @@ def run_query(spark_session,
     execution_time_list.append(
         (spark_app_id, "Data Maintenance End Time", DM_end)
     )
+    # Epoch seconds make the Maintenance 1 / Throughput 2 boundary portable
+    # between report readers and Spark drivers in different local time zones.
+    execution_time_list.extend([
+        (spark_app_id, "Maintenance Run Is Metric Compatible", int(metric_compatible)),
+        (spark_app_id, "Data Maintenance Start Timestamp", DM_start.timestamp()),
+        (spark_app_id, "Data Maintenance End Timestamp", DM_end.timestamp()),
+    ])
     execution_time_list.append(
         (spark_app_id, "Data Maintenance Time", DM_elapse))
     execution_time_list.append(
@@ -337,10 +358,12 @@ if __name__ == "__main__":
     valid_queries = get_valid_query_names(args.maintenance_queries)
     spark_session = create_spark_session(valid_queries, args.warehouse_path,
                                          args.warehouse_type, args.delta_unmanaged)
-    register_temp_views(spark_session, args.refresh_data_path)
-    query_dict = get_maintenance_queries(spark_session,
-                                         args.maintenance_queries_folder,
-                                         valid_queries)
-    run_query(spark_session, query_dict, args.time_log, args.json_summary_folder,
+    def prepare_queries():
+        register_temp_views(spark_session, args.refresh_data_path)
+        return get_maintenance_queries(spark_session,
+                                       args.maintenance_queries_folder,
+                                       valid_queries)
+
+    run_query(spark_session, prepare_queries, args.time_log, args.json_summary_folder,
               args.property_file, args.warehouse_path, args.warehouse_type, args.keep_sc,
               args.delta_unmanaged)

@@ -402,7 +402,8 @@ including NULL partitions; dimensions remain complete. Cutoff catalog loading
 requires fresh table names in the current database.
 
 Query times and `Power Test Time` exclude analysis; `Total Time` includes it.
-Analysis adds no timing CSV rows. With `--json_summary_folder`, total and
+Analysis cost adds no timing CSV rows; the standalone report is marked incompatible
+with full-score consumption. With `--json_summary_folder`, total and
 per-table analysis costs are written separately to `statistics/analyze-cost.json`.
 A summary folder is optional. Preparing a reused NDS summary folder removes the previous
 analysis-cost file, including when analysis is disabled.
@@ -624,8 +625,9 @@ mode, including Iceberg and managed Delta. For unmanaged Delta, it also excludes
 clone setup and cleanup. Earlier versions included SparkContext shutdown when
 `--keep_sc` was not set. Because this duration contributes to the composite
 benchmark score, timings and scores using these different boundaries are not
-directly comparable. Further timing-boundary corrections are tracked in
-[#297](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/297).
+directly comparable. The refresh-input start, enclosing maintenance span and
+shared Maintenance 1 / Throughput 2 boundary follow the timing rules below,
+addressing [#297](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/297).
 
 Note: The Delete functions in Data Maintenance cannot run successfully in Spark 3.2.0 and 3.2.1 due
 to a known Spark [issue](https://issues.apache.org/jira/browse/SPARK-39454). User can run it in Spark 3.2.2
@@ -742,6 +744,52 @@ Please note: each part of the benchmark will produce its report file for necessa
 execution time, start or end timestamp. The final metrics are calculated by those reports. Skipping
 a part of the benchmark may cause metrics calculation failure in the end if there's no necessary reports
 generated previously.
+
+NDS records benchmark time as follows:
+
+| Measurement | Boundary and accounting |
+| --- | --- |
+| Power | First SQL submission through the final result received by the driver; includes inter-query work, excludes final reporting/profiling and shutdown. |
+| Maintenance | Starts before reading refresh inputs; each test spans its first refresh start through its final SQL result, including all intervening process/report/launch gaps. |
+| Throughput 1 | First stream submission through the last stream's final result. |
+| Throughput 2 | Starts at the exact persisted Maintenance 1 end, including the following teardown/report/launch transition, and ends at the last stream's final result. |
+| Load statistics | Explicit ANALYZE runs inside Load, before its end timestamp and query seed; its cost enters the Load report once. |
+| Precision | Keep fractional timestamps, subtract first, then round elapsed seconds upward to 0.1 second in metric consumption. |
+
+Use `nds_transcode.py --analyze table|all_columns --hive` to collect statistics
+on persistent file-backed catalog tables during Load. Its end timestamp and
+query seed are generated only after ANALYZE completes. Delta and Iceberg ANALYZE
+are unsupported by this path and are rejected before loading; the Spark 3.3 /
+Delta 2.3 runtime rejects ANALYZE on its V2 tables. The full driver's native
+Delta/Iceberg Load therefore requires `load_test.analyze: none`.
+
+The Load report records `Load Statistics Mode`. When reusing an already prepared
+Load, set `load_test.analyze` to its recorded mode; the cost is read once from
+that Load report. Query streams and reused phase reports must originate from
+that completed Load and its final RNG seed. No statistics duration is added
+retrospectively to an older Load report. Unsupported analysis fails instead of
+producing an undercounted score.
+
+Standalone Power `--analyze`, warmups/repetitions, subsets, plan-only execution,
+result-file output, profiling/saved plans, custom/cutoff datasets, unmanaged
+clones and Connect runs remain available. Their CSVs are marked
+`Power Run Is Metric Compatible=0` and cannot feed the full benchmark metric,
+including through skipped phases. Tagged setup/cleanup runs retain their
+standalone diagnostic deductions (#224); such deductions cannot exclude required
+SQL from a scored query. The scored path uses a complete generated
+stream once in one session and includes the whole driver interval, rather than
+summing engine-event durations (#245).
+
+Maintenance reports persist explicit epoch endpoints so the shared Throughput 2
+boundary is independent of the reader's local timezone. Their numeric
+`Maintenance Run Is Metric Compatible` marker also excludes partial refreshes
+and isolated clone runs from full-score reuse. Reports missing the
+new maintenance endpoints or query compatibility marker must be regenerated;
+old timings/scores are not directly comparable. Unsupported or failed query
+streams cannot silently produce a full score. These changes address the timing
+inputs in [#297](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/297) and
+[#304](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/304). The metric
+converts rounded phase seconds to hours before its fourth root.
 
 Example command to run the benchmark:
 

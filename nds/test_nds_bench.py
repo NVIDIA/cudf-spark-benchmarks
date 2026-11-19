@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -101,21 +102,22 @@ class NdsBenchRefreshRunTest(unittest.TestCase):
         ]
         self.assertEqual(expected_calls, mock_run.call_args_list)
 
-    @patch("nds_bench.get_refresh_time")
+    @patch("nds_bench.get_maintenance_start_end_time")
     def test_maintenance_time_reads_only_its_refresh_reports(
-            self, mock_get_refresh_time):
+            self, mock_get_interval):
         for test_number, refresh_numbers in [(1, [1, 2]), (2, [3, 4])]:
             with self.subTest(test_number=test_number):
-                mock_get_refresh_time.reset_mock()
-                mock_get_refresh_time.side_effect = [1.01, 2.01]
+                mock_get_interval.reset_mock()
+                mock_get_interval.side_effect = [(Decimal('0'), Decimal('1.01')),
+                                                 (Decimal('2.01'), Decimal('4.02'))]
 
                 result = nds_bench.get_maintenance_time(
                     "/reports/maintenance", 9, test_number)
 
-                self.assertEqual(3.1, result)
+                self.assertEqual(4.1, result)
                 self.assertEqual(
                     [call(f"/reports/maintenance_{i}.csv") for i in refresh_numbers],
-                    mock_get_refresh_time.call_args_list)
+                    mock_get_interval.call_args_list)
 
     @patch("nds_bench.subprocess.run")
     def test_full_bench_validates_stream_count_before_starting(self, mock_run):
