@@ -31,7 +31,6 @@
 #
 
 import argparse
-import csv
 import json
 import datetime
 import os
@@ -45,6 +44,7 @@ from PysparkBenchReport import PysparkBenchReport
 from pyspark.sql import DataFrame
 
 from check import check_json_summary_folder, check_query_subset_exists, check_version
+from phase_report import write_phase_report
 from nds_schema import get_schemas
 
 from setup_utils import add_utils_to_sys_path
@@ -879,20 +879,21 @@ def run_query_stream(input_prefix,
     metric_compatible = (metric_compatible and bool(queries_reports) and
                          all(report.summary['queryStatus'] == ['Completed']
                              for report in queries_reports))
+    metrics = {'Power Run Is Metric Compatible': str(int(metric_compatible)),
+               'Power Start Time': str(power_start), 'Power End Time': str(power_end),
+               'Power Test Time': str(power_test_time)}
     execution_time_list.append(
-        (spark_app_id, 'Power Run Is Metric Compatible', int(metric_compatible)))
+        (spark_app_id, "Power Start Time", int(power_start)))
     execution_time_list.append(
-        (spark_app_id, "Power Start Time", power_start))
+        (spark_app_id, "Power End Time", int(power_end)))
     execution_time_list.append(
-        (spark_app_id, "Power End Time", power_end))
-    execution_time_list.append(
-        (spark_app_id, "Power Test Time", power_test_time))
-    if setup_time > 0:
+        (spark_app_id, "Power Test Time", int(power_test_time)))
+    if int(setup_time) > 0:
         execution_time_list.append(
-            (spark_app_id, "Power Setup Time", setup_time))
-    if cleanup_time > 0:
+            (spark_app_id, "Power Setup Time", int(setup_time)))
+    if int(cleanup_time) > 0:
         execution_time_list.append(
-            (spark_app_id, "Power Cleanup Time", cleanup_time))
+            (spark_app_id, "Power Cleanup Time", int(cleanup_time)))
     execution_time_list.append(
         (spark_app_id, "Total Time", total_elapse))
 
@@ -902,17 +903,11 @@ def run_query_stream(input_prefix,
     for row in execution_time_list:
         print(row)
     # write to local file at driver node
-    with open(time_log_output_path, 'w', encoding='UTF8') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(execution_time_list)
+    write_phase_report(time_log_output_path, header, execution_time_list, metrics)
     # write to csv in cloud environment
     if extra_time_log_output_path:
         spark_session = SparkSession.builder.getOrCreate()
-        # Preserve fractional values alongside integer durations in both CSVs.
-        time_df = spark_session.createDataFrame(
-            data=[tuple(str(value) for value in row) for row in execution_time_list],
-            schema=header)
+        time_df = spark_session.createDataFrame(data=execution_time_list, schema=header)
         time_df.coalesce(1).write.csv(extra_time_log_output_path)
 
     # check queries_reports, if there's any task or query failed, exit a non-zero to represent the script failure

@@ -4,7 +4,6 @@
 
 import contextlib
 import csv
-from decimal import Decimal
 import importlib.util
 import io
 import json
@@ -102,7 +101,7 @@ class AnalysisReuseTest(unittest.TestCase):
             timings = {row['query']: row['time/milliseconds'] for row in rows}
             self.assertNotIn('Statistics Time', timings)
             for row in rows:
-                self.assertTrue(Decimal(row['time/milliseconds']).is_finite())
+                int(row['time/milliseconds'])
             exported = []
             for part in (output / 'extra').glob('part-*.csv'):
                 with part.open() as stream:

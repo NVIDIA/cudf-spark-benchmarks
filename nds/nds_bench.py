@@ -42,10 +42,11 @@
 # 7. run nds_maintenance.py to do Maintenance Test 2. => get "Tdm2"
 
 import argparse
-import csv
 from decimal import Decimal, ROUND_CEILING
 import subprocess
 import yaml
+
+from phase_report import read_phase_metrics
 
 
 def get_yaml_params(yaml_file):
@@ -92,10 +93,7 @@ def get_load_time(load_report_file):
 
 def get_query_report(report_file):
     """Read a scored single-pass query-stream report, including reused reports."""
-    with open(report_file, newline='') as report:
-        rows = csv.reader(report)
-        next(rows, None)
-        values = {row[1]: row[2] for row in rows if len(row) == 3}
+    values = read_phase_metrics(report_file)
     if values.get('Power Run Is Metric Compatible') != '1':
         raise ValueError(f'{report_file}: rerun a complete query stream once with default '
                          'execution options. Power-time ANALYZE belongs in Load; '
@@ -211,8 +209,7 @@ def get_refresh_time(maintenance_report_file):
 
 def get_maintenance_start_end_time(report_file):
     """Read explicit epoch endpoints; never reinterpret a driver's local timezone."""
-    with open(report_file, newline='') as report:
-        values = {row[1]: row[2] for row in csv.reader(report) if len(row) == 3}
+    values = read_phase_metrics(report_file)
     try:
         if values.get('Maintenance Run Is Metric Compatible') != '1':
             raise ValueError('partial or standalone maintenance')

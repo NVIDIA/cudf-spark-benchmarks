@@ -753,19 +753,20 @@ data for one run of the maintenance insert and delete statements.
 | 5. Throughput 2 | Run the second group of query streams concurrently on the refreshed warehouse. Timing starts at the recorded Maintenance 1 endpoint and ends at the last stream result, including the gap before the streams launch. |
 | 6. Maintenance 2 | Apply the remaining refresh input sets. This uses the same first-read and final-result boundaries as Maintenance 1. |
 
-Power and Throughput CSVs record fractional epoch timestamps and elapsed
-milliseconds. The full driver accepts complete, successful single-pass streams
-with `Power Run Is Metric Compatible=1`. The standalone `nds_power.py` command
-supports diagnostic options such as writing query results, profiling, warmups
-and subsets. Those reports have `Power Run Is Metric Compatible=0`.
-Only standalone runs deduct separately tagged setup and cleanup queries.
+Power and Throughput CSVs report whole epoch seconds and integer milliseconds.
+Maintenance CSVs report local start and end times and elapsed seconds. For full
+benchmark scoring, each local phase CSV has a companion file, for example
+`power.csv.metrics.json`. It records precise epoch endpoints and whether the run
+is eligible for scoring. Keep each CSV and its companion together when moving
+reports or skipping phases. Reused reports must belong to the same Load and
+its generated streams.
 
-Maintenance CSVs record `Data Maintenance Start Timestamp` and
-`Data Maintenance End Timestamp` in epoch seconds. The full driver requires
-`Maintenance Run Is Metric Compatible=1`, which excludes partial refreshes
-and isolated clone runs. Reused reports must belong to the same Load and its
-generated streams. The score rounds each elapsed interval upward to 0.1 second
-after subtraction and converts the phase times to hours.
+The full driver accepts complete, successful single-pass query streams and
+complete maintenance refreshes. Standalone runs with diagnostic options such
+as warmups, query subsets, output writes, or isolated clones are ineligible.
+Only standalone runs deduct separately tagged setup and cleanup queries. The
+score rounds each elapsed interval upward to 0.1 second after subtraction and
+converts the phase times to hours.
 
 The full driver runs queries against Delta or Iceberg and accepts Load reports
 with statistics mode `none`. Standalone `nds_transcode.py --hive` can collect

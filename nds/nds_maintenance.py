@@ -31,7 +31,6 @@
 #
 
 import argparse
-import csv
 from datetime import datetime
 import os
 import sys
@@ -40,6 +39,7 @@ from pyspark.sql import SparkSession
 from PysparkBenchReport import PysparkBenchReport
 
 from check import check_json_summary_folder, get_abs_path
+from phase_report import write_phase_report
 from nds_schema import get_maintenance_schemas
 from nds_power import register_delta_tables
 
@@ -296,11 +296,9 @@ def run_query(spark_session,
     )
     # Epoch seconds make the Maintenance 1 / Throughput 2 boundary portable
     # between report readers and Spark drivers in different local time zones.
-    execution_time_list.extend([
-        (spark_app_id, "Maintenance Run Is Metric Compatible", int(metric_compatible)),
-        (spark_app_id, "Data Maintenance Start Timestamp", DM_start.timestamp()),
-        (spark_app_id, "Data Maintenance End Timestamp", DM_end.timestamp()),
-    ])
+    metrics = {'Maintenance Run Is Metric Compatible': str(int(metric_compatible)),
+               'Data Maintenance Start Timestamp': str(DM_start.timestamp()),
+               'Data Maintenance End Timestamp': str(DM_end.timestamp())}
     execution_time_list.append(
         (spark_app_id, "Data Maintenance Time", DM_elapse))
     execution_time_list.append(
@@ -308,10 +306,7 @@ def run_query(spark_session,
 
     # write to local csv file
     header = ["application_id", "query", "time/s"]
-    with open(time_log_output_path, 'w', encoding='UTF8') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(execution_time_list)
+    write_phase_report(time_log_output_path, header, execution_time_list, metrics)
     
 def register_temp_views(spark_session, refresh_data_path):
     refresh_tables = get_maintenance_schemas(True)
