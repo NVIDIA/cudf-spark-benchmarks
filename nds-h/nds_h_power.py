@@ -298,7 +298,7 @@ def run_query_stream(input_prefix,
                      app_name=None,
                      spark_connect=None,
                      analyze_tables=False,
-                     allow_failure=False, analyze=None):
+                     allow_failure=False, analyze=None, python_gc_after_query=False):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. Table setup time is also recorded.
 
@@ -316,6 +316,7 @@ def run_query_stream(input_prefix,
         :param json_summary_folder : path to save JSON summary files for each query.
         :param analyze_tables : whether to compute table statistics after creating tables.
         :param allow_failure : exit successfully even if a query or task failed.
+        :param python_gc_after_query : run Python garbage collection after each query attempt.
     """
     if analyze_tables and analyze is not None:
         raise ValueError('--analyze and --analyze_tables cannot be combined')
@@ -392,7 +393,8 @@ def run_query_stream(input_prefix,
                                              output_format,
                                              save_plan_path,
                                              plan_types,
-                                             skip_execution)
+                                             skip_execution,
+                                             python_gc_after_query=python_gc_after_query)
             print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
             query_times = summary['queryTimes']
             execution_time_list.append((spark_app_id, query_name, query_times[0]))
@@ -520,6 +522,9 @@ if __name__ == "__main__":
                         type=int,
                         help='Number of iterations for each query.',
                         default=1)
+    parser.add_argument('--python_gc_after_query', action='store_true',
+                        help='Run Python garbage collection after each query attempt, warmups included. ' +
+                        'Query times exclude it.')
     parser.add_argument('--save_plan_path',
                         help='Save the execution plan of each query to the specified file. If --skip_execution is ' +
                         'specified, the execution plan will be saved without executing the query.')
@@ -567,4 +572,5 @@ if __name__ == "__main__":
                      args.spark_connect,
                      args.analyze_tables,
                      args.allow_failure,
-                     args.analyze)
+                     args.analyze,
+                     python_gc_after_query=args.python_gc_after_query)

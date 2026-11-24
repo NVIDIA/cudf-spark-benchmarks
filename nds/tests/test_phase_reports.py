@@ -20,9 +20,9 @@ from phase_report import read_phase_metrics
 
 
 class PhaseReportTest(unittest.TestCase):
-    def test_query_executes_with_python36_wall_clock(self):
-        clock = Mock(spec=['time'])
-        clock.time.side_effect = [10.25, 10.75]
+    def test_query_records_wall_clock_boundaries(self):
+        clock = Mock(spec=['time_ns'])
+        clock.time_ns.side_effect = [10_250_000_000, 10_750_000_000]
         session = Mock()
         timing = {}
         with patch.object(nds_power, 'time', clock):

@@ -18,7 +18,7 @@ You may not use NDS except in compliance with the Apache License, Version 2.0 an
 
 ## Prerequisites
 
-1. python >= 3.6
+1. python >= 3.10
 2. Necessary libraries
 
     ```bash
@@ -316,6 +316,8 @@ The listener implementation is binary compatible with both Scala 2.12 and Scala 
 ### Power Run
 
 _After_ user generates query streams, Power Run can be executed using one of them by submitting `nds_power.py` to Spark.
+
+Add `--python_gc_after_query` to run Python garbage collection after each query attempt: after a warmup finishes, and after a timed attempt records its end time. The flag defaults to off, and `nds_bench.py` does not score a report from a run that sets it. Query times exclude the collection. `Power Test Time` includes the collections that run inside its recorded interval, so not the one after the final result, and `Total Time` includes all of them. Each JSON summary lists its attempts' collection times in milliseconds under `pythonGcTimes`. The time log's `.metrics.json` file records their sum as `Python GC Time`, and the sum of those inside `Power Test Time` as `Python GC Time In Power Test Time`, both in milliseconds.
 
 `nds_power.py --cutoff_date 2001-07-01` loads fact partitions whose date keys
 map to dates on or before the cutoff in `date_dim`. NULL-date partitions are always

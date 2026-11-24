@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,10 +36,10 @@ from pathlib import Path
 
 
 def check_version():
-    req_ver = (3, 6)
+    req_ver = (3, 10)
     cur_ver = sys.version_info
     if cur_ver < req_ver:
-        raise Exception('Minimum required Python version is 3.6, but current python version is {}.'
+        raise Exception('Minimum required Python version is 3.10, but current python version is {}.'
                         .format(str(cur_ver.major) + '.' + str(cur_ver.minor)) +
                         ' Please use proper Python version')
 
