@@ -18,7 +18,7 @@ You may not use NDS-H except in compliance with the Apache License, Version 2.0 
 
 ## Prerequisites
 
-1. Python >= 3.6
+1. Python >= 3.10
 2. Necessary libraries
 
     ```bash
@@ -196,6 +196,8 @@ The listener implementation is binary compatible with both Scala 2.12 and Scala 
 ### Power Run
 
 _After_ user generates query streams, Power Run can be executed using one of them by submitting `nds_h_power.py` to Spark.
+
+Add `--python_gc_after_query` to run Python garbage collection after each query attempt: after a warmup finishes, and after a timed attempt records its end time. The flag defaults to off. Query times exclude the collection, and `Power Test Time` and `Total Time` include all of it. Each JSON summary lists its attempts' collection times in milliseconds under `pythonGcTimes`.
 
 Add `--allow_failure` to an `nds_h_power.py` run to exit successfully even when a
 query fails or completes with failed tasks. Without the flag, these failures

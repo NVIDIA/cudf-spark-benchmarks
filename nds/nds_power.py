@@ -543,10 +543,7 @@ def parse_explain_str(explain_str):
 
 
 def _wall_time_ns():
-    if hasattr(time, 'time_ns'):
-        return time.time_ns()
-    # Python 3.6 exposes wall-clock timestamps in seconds only.
-    return int(time.time() * 1_000_000_000)
+    return time.time_ns()
 
 
 def run_one_query(spark_session,
@@ -673,7 +670,8 @@ def run_query_stream(input_prefix,
                      skip_execution=False,
                      app_name=None,
                      spark_connect=None,
-                     analyze_tables=False, cutoff_date=None, analyze=None, dataset_manifest=None):
+                     analyze_tables=False, cutoff_date=None, analyze=None, dataset_manifest=None,
+                     python_gc_after_query=False):
     """run SQL in Spark and record execution time log. The execution time log is saved as a CSV file
     for easy accessibility. Table setup time is also recorded.
 
@@ -690,6 +688,7 @@ def run_query_stream(input_prefix,
         to "parquet".
         analyze_tables (bool, optional): whether to compute table statistics after creating tables.
         dataset_manifest (str, optional): explicit driver-local JSON file or Hadoop-supported URI.
+        python_gc_after_query (bool, optional): run Python garbage collection after each query attempt.
     """
     if dataset_manifest is not None and input_format is not None:
         raise ValueError('--dataset_manifest and --input_format cannot be combined')
@@ -789,7 +788,7 @@ def run_query_stream(input_prefix,
                              not any((sub_queries, sub_query_patterns, skip_execution,
                                       output_path, profiling_hook, save_plan_path,
                                       analyze_tables, analyze, dataset_manifest, cutoff_date,
-                                      spark_connect, delta_unmanaged)))
+                                      spark_connect, delta_unmanaged, python_gc_after_query)))
 
         # Setup profiler
         profiler = Profiler(profiling_hook=profiling_hook, output_root=json_summary_folder)
@@ -821,7 +820,8 @@ def run_query_stream(input_prefix,
                                          save_plan_path,
                                          plan_types,
                                          skip_execution,
-                                         query_timing)
+                                         query_timing,
+                                         python_gc_after_query=python_gc_after_query)
             print(f"Time taken: {summary['queryTimes']} millis for {query_name}")
             query_times = summary['queryTimes']
             for query_time in query_times:
@@ -882,6 +882,19 @@ def run_query_stream(input_prefix,
     metrics = {'Power Run Is Metric Compatible': str(int(metric_compatible)),
                'Power Start Time': str(power_start), 'Power End Time': str(power_end),
                'Power Test Time': str(power_test_time)}
+    if python_gc_after_query:
+        gc_times = [gc_time for report in queries_reports
+                    for gc_time in report.summary['pythonGcTimes']]
+        metrics['Python GC Time'] = str(round(sum(gc_times), 3))
+        # Collections run between attempts, so each lies wholly inside or outside the Power
+        # interval. The query loop sets its endpoints, in seconds, when no attempt reached Spark.
+        power_start_ns = query_timing.get('start_ns', power_start * 1_000_000_000)
+        power_end_ns = query_timing.get('end_ns', power_end * 1_000_000_000)
+        gc_in_power = [gc_time for report in queries_reports
+                       for gc_time, (start, end) in zip(report.summary['pythonGcTimes'],
+                                                        report.python_gc_spans)
+                       if power_start_ns <= start and end <= power_end_ns]
+        metrics['Python GC Time In Power Test Time'] = str(round(sum(gc_in_power), 3))
     execution_time_list.append(
         (spark_app_id, "Power Start Time", int(power_start)))
     execution_time_list.append(
@@ -1017,6 +1030,9 @@ if __name__ == "__main__":
                         type=int,
                         help='Number of iterations for each query.',
                         default=1)
+    parser.add_argument('--python_gc_after_query', action='store_true',
+                        help='Run Python garbage collection after each query attempt, warmups included. ' +
+                        'Query times exclude it.')
     parser.add_argument('--save_plan_path',
                         help='Save the execution plan of each query to the specified file. If --skip_execution is ' +
                         'specified, the execution plan will be saved without executing the query.')
@@ -1078,4 +1094,5 @@ if __name__ == "__main__":
                      args.analyze_tables,
                      args.cutoff_date,
                      args.analyze,
-                     args.dataset_manifest)
+                     args.dataset_manifest,
+                     python_gc_after_query=args.python_gc_after_query)

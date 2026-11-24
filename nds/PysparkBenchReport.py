@@ -30,6 +30,7 @@
 # obtained from using this file do not comply with the TPC-DS Benchmark.
 #
 
+import gc
 import json
 import os
 import time
@@ -55,6 +56,8 @@ class PysparkBenchReport:
             'queryTimes': [],
             'query': query_name,
         }
+        # Wall-clock start and end of each collection, in nanoseconds, for the Power interval.
+        self.python_gc_spans = []
 
     def _is_spark_400_or_later(self):
         return self.spark_session.version >= "4.0.0"
@@ -93,12 +96,15 @@ class PysparkBenchReport:
             return get_all() if callable(get_all) else (get_all or [])
 
 
-    def report_on(self, fn: Callable, warmup_iterations = 0, iterations = 1, *args):
+    def report_on(self, fn: Callable, warmup_iterations = 0, iterations = 1, *args,
+                  python_gc_after_query=False):
         """Record a function for its running environment, running status etc. and exclude sentive
         information like tokens, secret and password Generate summary in dict format for it.
 
         Args:
             fn (Callable): a function to be recorded
+            python_gc_after_query (bool): run Python garbage collection after each warmup and
+                timed call, once its end time is taken, and record each collection's duration
 
         Returns:
             dict: summary of the fn
@@ -113,15 +119,22 @@ class PysparkBenchReport:
         listener = self._register_python_listener()
         if listener is not None:
             print("TaskFailureListener is registered.")
-        try:
-            # warmup
-            for i in range(0, warmup_iterations):
+        if python_gc_after_query:
+            self.summary['pythonGcTimes'] = []
+        # warmup
+        for i in range(0, warmup_iterations):
+            warmup_failed = False
+            try:
                 fn(*args)
-        except Exception as e:
-            print('ERROR WHILE WARMUP BEGIN')
-            print(e)
-            traceback.print_tb(e.__traceback__)
-            print('ERROR WHILE WARMUP END')
+            except Exception as e:
+                print('ERROR WHILE WARMUP BEGIN')
+                print(e)
+                traceback.print_tb(e.__traceback__)
+                print('ERROR WHILE WARMUP END')
+                warmup_failed = True
+            self._collect_python_garbage(python_gc_after_query)
+            if warmup_failed:
+                break
 
         start_time = int(time.time() * 1000)
         self.summary['startTime'] = start_time
@@ -146,9 +159,22 @@ class PysparkBenchReport:
                 self.summary['exceptions'].append(str(e))
             finally:
                 self.summary['queryTimes'].append(end_time - start_time)
+            self._collect_python_garbage(python_gc_after_query)
         if listener is not None:
             listener.unregister()
         return self.summary
+
+    def _collect_python_garbage(self, enabled):
+        """Collect Python reference cycles, whose Py4J proxies keep finished JVM query plans
+        reachable. Call it outside an except clause, whose traceback keeps the failed call's
+        frames reachable. Time it on the wall clock, which times the queries and the Power
+        interval."""
+        if enabled:
+            start = time.time_ns()
+            gc.collect()
+            end = time.time_ns()
+            self.summary['pythonGcTimes'].append(round((end - start) / 1_000_000, 3))
+            self.python_gc_spans.append((start, end))
 
     def write_summary(self, prefix=""):
         """_summary_
