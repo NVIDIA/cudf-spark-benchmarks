@@ -3,6 +3,7 @@
 
 import contextlib
 import csv
+from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
@@ -29,6 +30,78 @@ class PhaseReportTest(unittest.TestCase):
         session.sql.return_value.collect.assert_called_once_with()
         self.assertEqual(timing, {'start_ns': 10_250_000_000, 'end_ns': 10_750_000_000,
                                   'query_ns': 500_000_000})
+
+    def test_power_report_spans_first_submission_to_final_result(self):
+        now_ns = 100_125_000_000
+
+        def advance(milliseconds):
+            nonlocal now_ns
+            now_ns += milliseconds * 1_000_000
+
+        clock = Mock()
+        clock.time_ns.side_effect = lambda: now_ns
+        clock.time.side_effect = lambda: now_ns / 1_000_000_000
+        session = Mock()
+        session.version = '3.5.5'
+        session.sparkContext._conf.getAll.return_value = []
+
+        def submit(query):
+            advance(100)
+            frame = Mock()
+            frame.collect.side_effect = lambda: advance(125)
+            return frame
+
+        session.sql.side_effect = submit
+        builder = Mock()
+        builder.appName.return_value.getOrCreate.return_value = session
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'power.csv'
+            with patch.object(nds_power.SparkSession, 'builder', builder), \
+                    patch.object(nds_power.PysparkBenchReport, '_register_python_listener',
+                                 return_value=None), \
+                    patch.object(nds_power, 'time', clock), \
+                    patch.object(nds_power, 'setQueryName', side_effect=lambda *_: advance(500)), \
+                    patch.object(nds_power, 'clearQueryName', side_effect=lambda *_: advance(2000)):
+                nds_power.run_query_stream('/tables', None,
+                                           {'query1': 'SELECT 1', 'query2': 'SELECT 2'},
+                                           str(path), None, None, None, 0, 1, [],
+                                           input_format='iceberg')
+            with path.open() as stream:
+                values = {r['query']: r['time/milliseconds'] for r in csv.DictReader(stream)}
+        self.assertEqual(float(values['Power Start Time']), 100.625)
+        self.assertEqual(float(values['Power End Time']), 101.575)
+        self.assertEqual(float(values['Power Test Time']), 950)
+
+    def test_maintenance_report_spans_refresh_read_to_final_result(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = start
+
+        def advance(seconds):
+            nonlocal now
+            now += timedelta(seconds=seconds)
+
+        def read_refresh_inputs():
+            advance(5)
+            return {'DF_CS': ['refresh SQL']}
+
+        session = Mock()
+        session.version = '3.5.5'
+        session.sparkContext._conf.getAll.return_value = []
+        session.sql.return_value.collect.side_effect = lambda: advance(0.25)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'maintenance.csv'
+            with patch.object(nds_maintenance, 'datetime') as clock, \
+                    patch.object(nds_maintenance.PysparkBenchReport, '_register_python_listener',
+                                 return_value=None), \
+                    patch.object(nds_maintenance, 'clearQueryName', side_effect=lambda *_: advance(2)):
+                clock.now.side_effect = lambda: now
+                nds_maintenance.run_query(session, read_refresh_inputs, str(path), None,
+                                          None, '/tables', 'iceberg', True)
+            with path.open() as stream:
+                values = {r['query']: r['time/s'] for r in csv.DictReader(stream)}
+        self.assertEqual(float(values['Data Maintenance Start Timestamp']), start.timestamp())
+        self.assertEqual(float(values['Data Maintenance End Timestamp']), start.timestamp() + 5.25)
+        self.assertEqual(float(values['Data Maintenance Time']), 5.25)
 
     def test_full_power_stream_checks_session_returned_by_builder(self):
         class ConnectSession(Mock):

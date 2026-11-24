@@ -419,7 +419,6 @@ def run_full_bench(yaml_params):
     warehouse_output_path = yaml_params['load_test']['output_path']
     warehouse_type = yaml_params['load_test']['warehouse_type']
     load_report_path = yaml_params['load_test']['report_path']
-    load_analyze = yaml_params['load_test'].get('analyze', 'none') or 'none'
     skip_stream_gen = yaml_params['generate_query_stream']['skip']
     num_streams = yaml_params['generate_query_stream']['num_streams']
     num_streams_in_throughput = get_num_streams_in_throughput(num_streams)
@@ -430,7 +429,7 @@ def run_full_bench(yaml_params):
     power_template_path = yaml_params['power_test']['spark_template_path']
     power_report_path = yaml_params['power_test']['report_path']
     power_property_path = yaml_params['power_test']['property_path']
-    power_output_path = yaml_params['power_test']['output_path']
+    power_output_path = yaml_params['power_test'].get('output_path')
     skip_throughput_test = yaml_params['throughput_test']['skip']
     throughput_template_path = yaml_params['throughput_test']['spark_template_path']
     throughput_report_base = yaml_params['throughput_test']['report_base_path']
@@ -442,12 +441,6 @@ def run_full_bench(yaml_params):
     maintenance_report_base_path = yaml_params['maintenance_test']['maintenance_report_base_path']
     metrics_report = yaml_params['metrics_report_path']
 
-    if load_analyze not in ('none', 'table', 'all_columns'):
-        raise ValueError('load_test.analyze must be none, table, or all_columns')
-    if load_analyze != 'none' and not skip_load_test:
-        raise ValueError("Explicit ANALYZE is unsupported by the full driver's Delta/Iceberg "
-                         'Load paths. Collect statistics in a supported persistent Hive '
-                         'file-table Load before generating its query seed and reports.')
     if power_output_path:
         raise ValueError('Full-metric queries must collect results; leave power_test.output_path empty')
     # Check reused query reports before launching any new work.
@@ -472,8 +465,9 @@ def run_full_bench(yaml_params):
     with open(load_report_path) as report:
         recorded_mode = next((line.split(':', 1)[1].strip() for line in report
                               if line.startswith('Load Statistics Mode:')), 'none')
-    if recorded_mode != load_analyze:
-        raise ValueError('Load statistics mode differs from its report; rerun Load and query generation')
+    if recorded_mode != 'none':
+        raise ValueError('The full benchmark requires a Delta or Iceberg Load report with '
+                         'Load Statistics Mode set to none')
     Tld = round_up_to_nearest_10_percent(Decimal(get_load_time(load_report_path)))
     # 2.
     if not skip_stream_gen:

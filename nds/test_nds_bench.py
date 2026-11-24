@@ -4,7 +4,7 @@
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import call, mock_open, patch
 
 import nds_bench
 
@@ -118,6 +118,28 @@ class NdsBenchRefreshRunTest(unittest.TestCase):
                 self.assertEqual(
                     [call(f"/reports/maintenance_{i}.csv") for i in refresh_numbers],
                     mock_get_interval.call_args_list)
+
+    @patch("nds_bench.get_start_end_time")
+    def test_throughput_two_includes_gap_after_maintenance_one(self, mock_get_interval):
+        mock_get_interval.side_effect = [('20.25', '21.50'), ('20.50', '23.25'),
+                                         ('20.75', '23.00'), ('20.90', '22.75')]
+        elapsed = nds_bench.get_throughput_time('/reports/throughput', 9, 2,
+                                               maintenance_end=Decimal('15.00'))
+        self.assertEqual(elapsed, 8.3)
+
+    def test_full_driver_rejects_analyzed_load_report(self):
+        with (Path(__file__).parent / "bench.yml").open() as config_file:
+            config = nds_bench.yaml.safe_load(config_file)
+        config['data_gen']['skip'] = True
+        config['load_test']['skip'] = True
+        for mode in ('table', 'all_columns'):
+            with self.subTest(mode=mode):
+                # An old config cannot pair an analyzed Hive Load with Delta/Iceberg phases.
+                config['load_test']['analyze'] = mode
+                report = mock_open(read_data=f'Load Statistics Mode: {mode}\n')
+                with patch('builtins.open', report), \
+                        self.assertRaisesRegex(ValueError, 'Load Statistics Mode set to none'):
+                    nds_bench.run_full_bench(config)
 
     @patch("nds_bench.subprocess.run")
     def test_full_bench_validates_stream_count_before_starting(self, mock_run):

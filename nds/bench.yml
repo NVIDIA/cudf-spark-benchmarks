@@ -29,7 +29,6 @@ load_test:
   output_path: PATH_FOR_ICEBERG_OR_DELTA_WAREHOUSE # warehouse location for Iceberg or DeltaLake
   warehouse_type: iceberg # support "iceberg" and "delta", use "iceberg" by default
   report_path: load_test.txt # execution report path
-  analyze: none # match Load Statistics Mode when reusing an analyzed Load report
   skip: false
 generate_query_stream:
   # how many streams to be generated including the stream for Power Test
@@ -46,7 +45,6 @@ power_test: # use load test output as input to avoid duplication
   spark_template_path: power_run_gpu_iceberg.template
   report_path: power_test.csv
   property_path: properties/aqe-on.properties # property file contains some Spark configs as a addition to spark template file
-  output_path: # leave it empty to use "collect" as Spark action. Otherwise it can be used for data validation
   skip: false
 throughput_test: # use most parameters from power test to avoid duplication
   spark_template_path: throughput_run_gpu_iceberg.template # user can copy the one used for Power run and add resource limit
