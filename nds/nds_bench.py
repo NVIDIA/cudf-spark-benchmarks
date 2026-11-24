@@ -42,9 +42,11 @@
 # 7. run nds_maintenance.py to do Maintenance Test 2. => get "Tdm2"
 
 import argparse
-import math
+from decimal import Decimal, ROUND_CEILING
 import subprocess
 import yaml
+
+from phase_report import read_phase_metrics
 
 
 def get_yaml_params(yaml_file):
@@ -89,38 +91,34 @@ def get_load_time(load_report_file):
             f"Load Test Time not found in Load Test report file: {load_report_file}.")
 
 
+def get_query_report(report_file):
+    """Read a scored single-pass query-stream report, including reused reports."""
+    values = read_phase_metrics(report_file)
+    if values.get('Power Run Is Metric Compatible') != '1':
+        raise ValueError(f'{report_file}: rerun a complete query stream once with default '
+                         'execution options. Power-time ANALYZE belongs in Load; '
+                         'extended/legacy reports cannot be used for the full metric.')
+    try:
+        start, end, duration = (Decimal(values[name]) for name in
+                                ('Power Start Time', 'Power End Time', 'Power Test Time'))
+        if (not all(value.is_finite() for value in (start, end, duration)) or
+                start <= 0 or end <= start or duration <= 0 or
+                abs((end - start) * 1000 - duration) > 1):
+            raise ValueError('invalid query interval')
+    except (KeyError, ValueError, ArithmeticError) as error:
+        raise ValueError(f'{report_file}: invalid or inconsistent query timing') from error
+    return values
+
+
 def get_power_time(power_report_file):
-    """get the total elapse time for Power Test in str format from the power report file"""
-    power_elapse = None
-    with open(power_report_file, "r") as f:
-        for line in f:
-            if "Power Test Time" in line:
-                # e.g. "app-20220715143743-0007,Power Test Time,11838"
-                power_elapse = line.split(",")[2].strip()
-    if power_elapse:
-        return power_elapse
-    else:
-        raise Exception(
-            f"Power Test Time not found in Power Test report file: {power_report_file}.")
+    """Get the continuous Power interval in milliseconds."""
+    return get_query_report(power_report_file)['Power Test Time']
 
 
 def get_start_end_time(report_file):
-    """get the start timestamp in str format from the Power Test report file"""
-    start_time = None
-    end_time = None
-    with open(report_file, "r") as f:
-        for line in f:
-            if "Power Start Time" in line:
-                # e.g. "app-20220715143743-0007,Power Start Time,1659067405.468058"
-                start_time = line.split(",")[2].strip()
-            if "Power End Time" in line:
-                # e.g. "app-20220715143743-0007,Power End Time,1659067405.468058"
-                end_time = line.split(",")[2].strip()
-    if start_time and end_time:
-        return start_time, end_time
-    else:
-        raise Exception(
-            f"Start or End time not found in Power Test report file: {report_file}")
+    """Return fractional epoch seconds for a scored query stream."""
+    report = get_query_report(report_file)
+    return report['Power Start Time'], report['Power End Time']
 
 
 def get_num_streams_in_throughput(num_streams):
@@ -164,7 +162,8 @@ def get_refresh_range(num_streams, first_or_second):
     raise ValueError("first_or_second must be 1 or 2")
 
 
-def get_throughput_time(throughput_report_file_base, num_streams, first_or_second):
+def get_throughput_time(throughput_report_file_base, num_streams, first_or_second,
+                        maintenance_end=None):
     """get Throughput elapse time according to Spec 7.4.7.4. 
     Filter all Throughput reports and get the start timestamp and end timestamp to calculate the 
     elapse time of Throughput Test
@@ -178,9 +177,15 @@ def get_throughput_time(throughput_report_file_base, num_streams, first_or_secon
     for stream_num in stream_range:
         report_file = throughput_report_file_base + f"_{stream_num}.csv"
         sub_start_time, sub_end_time = get_start_end_time(report_file)
-        start_time.append(float(sub_start_time))
-        end_time.append(float(sub_end_time))
-    start_time = min(start_time)
+        start_time.append(Decimal(sub_start_time))
+        end_time.append(Decimal(sub_end_time))
+    first_query_start = min(start_time)
+    if first_or_second == 2:
+        if maintenance_end is None or maintenance_end > first_query_start:
+            raise ValueError('Throughput Test 2 requires the preceding Maintenance 1 end')
+        start_time = maintenance_end
+    else:
+        start_time = first_query_start
     end_time = max(end_time)
     elapse = round_up_to_nearest_10_percent(end_time - start_time)
     return elapse
@@ -202,27 +207,29 @@ def get_refresh_time(maintenance_report_file):
                         f"{maintenance_report_file}.")
 
 
-def get_maintenance_time(maintenance_report_base_path,
-                         num_streams, first_or_second):
-    """Get maintenance time from maintenance report files generated in one maintenance test.
-    THe maintenance time is the sum of the elapse time of all maintenance reports in one maintenance test.
+def get_maintenance_start_end_time(report_file):
+    """Read explicit epoch endpoints; never reinterpret a driver's local timezone."""
+    values = read_phase_metrics(report_file)
+    try:
+        if values.get('Maintenance Run Is Metric Compatible') != '1':
+            raise ValueError('partial or standalone maintenance')
+        start = Decimal(values['Data Maintenance Start Timestamp'])
+        end = Decimal(values['Data Maintenance End Timestamp'])
+        if not start.is_finite() or not end.is_finite() or end < start:
+            raise ValueError('invalid endpoints')
+    except (KeyError, ValueError, ArithmeticError) as error:
+        raise ValueError(f'{report_file}: rerun maintenance to obtain explicit epoch '
+                         'start/end timestamps including refresh-input reads') from error
+    return start, end
 
-    Args:
-        maintenance_report_base_path (str): base path of maintenance report files.
-        num_streams (int): total number of streams.
-        first_or_second (int): 1 or 2 for first or second maintenance test.
 
-    Returns:
-        float: elapse time of maintenance test.
-    """
-    refresh_nums = get_refresh_range(num_streams, first_or_second)
-    Tdm = 0
-    # Sum the Sq / 2 refresh runs assigned to this maintenance test.
-    for i in refresh_nums:
-        maintenance_report_path = maintenance_report_base_path + \
-            f"_{i}" + ".csv"
-        Tdm += float(get_refresh_time(maintenance_report_path))
-    return round_up_to_nearest_10_percent(Tdm)
+def get_maintenance_time(maintenance_report_base_path, num_streams, first_or_second):
+    """First refresh start through final refresh end, including every gap."""
+    intervals = [get_maintenance_start_end_time(f'{maintenance_report_base_path}_{i}.csv')
+                 for i in get_refresh_range(num_streams, first_or_second)]
+    if any(previous[1] > following[0] for previous, following in zip(intervals, intervals[1:])):
+        raise ValueError('Maintenance refresh reports must be sequential and non-overlapping')
+    return round_up_to_nearest_10_percent(intervals[-1][1] - intervals[0][0])
 
 
 def get_throughput_stream_nums(num_streams, first_or_second):
@@ -234,7 +241,10 @@ def get_throughput_stream_nums(num_streams, first_or_second):
 
 
 def round_up_to_nearest_10_percent(num):
-    return math.ceil(num * 10) / 10
+    elapsed = Decimal(str(num))
+    if not elapsed.is_finite() or elapsed < 0:
+        raise ValueError('Elapsed seconds must be finite and nonnegative')
+    return float(elapsed.quantize(Decimal('0.1'), rounding=ROUND_CEILING))
 
 
 def run_data_gen(scale_factor, parallel, data_path, local_or_hdfs, num_streams):
@@ -416,7 +426,7 @@ def run_full_bench(yaml_params):
     power_template_path = yaml_params['power_test']['spark_template_path']
     power_report_path = yaml_params['power_test']['report_path']
     power_property_path = yaml_params['power_test']['property_path']
-    power_output_path = yaml_params['power_test']['output_path']
+    power_output_path = yaml_params['power_test'].get('output_path')
     skip_throughput_test = yaml_params['throughput_test']['skip']
     throughput_template_path = yaml_params['throughput_test']['spark_template_path']
     throughput_report_base = yaml_params['throughput_test']['report_base_path']
@@ -427,6 +437,16 @@ def run_full_bench(yaml_params):
     maintenance_query_dir = yaml_params['maintenance_test']['query_dir']
     maintenance_report_base_path = yaml_params['maintenance_test']['maintenance_report_base_path']
     metrics_report = yaml_params['metrics_report_path']
+
+    if power_output_path:
+        raise ValueError('Full-metric queries must collect results; leave power_test.output_path empty')
+    # Check reused query reports before launching any new work.
+    if skip_power_test:
+        get_power_time(power_report_path)
+    if skip_throughput_test:
+        for test in (1, 2):
+            for stream in get_stream_range(num_streams, test):
+                get_query_report(f'{throughput_report_base}_{stream}.csv')
 
     # 0.
     if not skip_data_gen:
@@ -439,7 +459,13 @@ def run_full_bench(yaml_params):
                       warehouse_output_path,
                       warehouse_type,
                       load_report_path)
-    Tld = round_up_to_nearest_10_percent(float(get_load_time(load_report_path)))
+    with open(load_report_path) as report:
+        recorded_mode = next((line.split(':', 1)[1].strip() for line in report
+                              if line.startswith('Load Statistics Mode:')), 'none')
+    if recorded_mode != 'none':
+        raise ValueError('The full benchmark requires a Delta or Iceberg Load report with '
+                         'Load Statistics Mode set to none')
+    Tld = round_up_to_nearest_10_percent(Decimal(get_load_time(load_report_path)))
     # 2.
     if not skip_stream_gen:
         # RNGSEED is required for query stream generation in Spec 4.3.1
@@ -460,7 +486,7 @@ def run_full_bench(yaml_params):
     # But Spec 7.1.16: Elapsed time is measured in seconds rounded up to the nearest 0.1 second.
     # Convert it to seconds.
     TPower = round_up_to_nearest_10_percent(
-        float(get_power_time(power_report_path)) / 1000)
+        Decimal(get_power_time(power_report_path)) / 1000)
 
     # 4.
     if not skip_throughput_test:
@@ -488,6 +514,9 @@ def run_full_bench(yaml_params):
     Tdm1 = get_maintenance_time(maintenance_report_base_path,
                                 num_streams,
                                 1)
+    last_refresh_1 = get_refresh_range(num_streams, 1)[-1]
+    maintenance_1_end = get_maintenance_start_end_time(
+        f'{maintenance_report_base_path}_{last_refresh_1}.csv')[1]
     # 6
     if not skip_throughput_test:
         throughput_test(num_streams,
@@ -499,7 +528,7 @@ def run_full_bench(yaml_params):
                         power_property_path,
                         warehouse_type)
     Ttt2 = get_throughput_time(throughput_report_base,
-                               num_streams, 2)
+                               num_streams, 2, maintenance_1_end)
     # 7
     if not skip_maintenance_test:
         maintenance_test(num_streams,

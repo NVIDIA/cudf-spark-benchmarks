@@ -402,7 +402,8 @@ including NULL partitions; dimensions remain complete. Cutoff catalog loading
 requires fresh table names in the current database.
 
 Query times and `Power Test Time` exclude analysis; `Total Time` includes it.
-Analysis adds no timing CSV rows. With `--json_summary_folder`, total and
+Analysis cost adds no timing CSV rows; the standalone report is marked incompatible
+with full-score consumption. With `--json_summary_folder`, total and
 per-table analysis costs are written separately to `statistics/analyze-cost.json`.
 A summary folder is optional. Preparing a reused NDS summary folder removes the previous
 analysis-cost file, including when analysis is disabled.
@@ -619,13 +620,9 @@ Delta maintenance uses the Hive catalog and requires a working Hive metastore.
 Configure the cluster's metastore rather than relying on the default local Derby
 metastore, and set the shared `spark.sql.warehouse.dir` described above.
 
-`Data Maintenance Time` now ends before SparkContext shutdown for every storage
-mode, including Iceberg and managed Delta. For unmanaged Delta, it also excludes
-clone setup and cleanup. Earlier versions included SparkContext shutdown when
-`--keep_sc` was not set. Because this duration contributes to the composite
-benchmark score, timings and scores using these different boundaries are not
-directly comparable. Further timing-boundary corrections are tracked in
-[#297](https://github.com/NVIDIA/cudf-spark-benchmarks/issues/297).
+`Data Maintenance Time` includes the refresh-input reads and ends when the driver
+receives the final maintenance SQL result. Unmanaged Delta clone setup and
+cleanup, final reporting and SparkContext shutdown are outside this interval.
 
 Note: The Delete functions in Data Maintenance cannot run successfully in Spark 3.2.0 and 3.2.1 due
 to a known Spark [issue](https://issues.apache.org/jira/browse/SPARK-39454). User can run it in Spark 3.2.2
@@ -742,6 +739,41 @@ Please note: each part of the benchmark will produce its report file for necessa
 execution time, start or end timestamp. The final metrics are calculated by those reports. Skipping
 a part of the benchmark may cause metrics calculation failure in the end if there's no necessary reports
 generated previously.
+
+`nds_bench.py` runs the six phases below in order. A query stream is an ordered
+sequence of SQL queries. Each refresh input set supplies the rows and control
+data for one run of the maintenance insert and delete statements.
+
+| Phase | Work and recorded time |
+| --- | --- |
+| 1. Load | Read the base data and write the Delta or Iceberg warehouse tables. Timing spans the first table read through the final table write. The end timestamp seeds query-stream generation. |
+| 2. Power | Run one query stream on the loaded warehouse. Timing begins at the first SQL submission and ends when the driver receives the final result, including gaps between queries. |
+| 3. Throughput 1 | Run the first group of query streams concurrently. Timing spans the earliest SQL submission through the last result across all streams. |
+| 4. Maintenance 1 | Apply the first half of the refresh input sets in sequence. Timing begins before the first refresh-input read and ends at the final maintenance SQL result, including gaps between refresh runs. |
+| 5. Throughput 2 | Run the second group of query streams concurrently on the refreshed warehouse. Timing starts at the recorded Maintenance 1 endpoint and ends at the last stream result, including the gap before the streams launch. |
+| 6. Maintenance 2 | Apply the remaining refresh input sets. This uses the same first-read and final-result boundaries as Maintenance 1. |
+
+Power and Throughput CSVs report whole epoch seconds and integer milliseconds.
+Maintenance CSVs report local start and end times and elapsed seconds. For full
+benchmark scoring, each local phase CSV has a companion file, for example
+`power.csv.metrics.json`. It records precise epoch endpoints and whether the run
+is eligible for scoring. Keep each CSV and its companion together when moving
+reports or skipping phases. Reused reports must belong to the same Load and
+its generated streams.
+
+The full driver accepts complete, successful single-pass query streams and
+complete maintenance refreshes. Standalone runs with diagnostic options such
+as warmups, query subsets, output writes, or isolated clones are ineligible.
+Only standalone runs deduct separately tagged setup and cleanup queries. The
+score rounds each elapsed interval upward to 0.1 second after subtraction and
+converts the phase times to hours.
+
+The full driver runs queries against Delta or Iceberg and accepts Load reports
+with statistics mode `none`. Standalone `nds_transcode.py --hive` can collect
+statistics on persistent file-backed catalog tables using `--analyze table` or
+`--analyze all_columns`. The Load timer includes this work before the end
+timestamp and query seed are recorded. The Load report records the selected
+mode in `Load Statistics Mode`.
 
 Example command to run the benchmark:
 
