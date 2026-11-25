@@ -28,12 +28,12 @@ def write_phase_report(path, header, rows, metrics):
 
 def read_phase_metrics(path):
     data = Path(path).read_bytes()
+    metadata_path = Path(f'{path}.metrics.json')
     try:
-        metadata = Path(f'{path}.metrics.json').read_text(encoding='utf-8')
-    except FileNotFoundError:
-        # Earlier reports from this timing change stored the metrics in CSV rows.
-        rows = csv.reader(io.StringIO(data.decode('utf-8'), newline=''))
-        return {row[1]: row[2] for row in rows if len(row) == 3}
+        metadata = metadata_path.read_text(encoding='utf-8')
+    except FileNotFoundError as error:
+        raise ValueError(f'{metadata_path}: missing metrics companion; restore it with '
+                         'its matching CSV or rerun this phase') from error
     record = json.loads(metadata)
     if record['csv_sha256'] != hashlib.sha256(data).hexdigest():
         raise ValueError(f'{path}: CSV and .metrics.json do not match; rerun this phase')

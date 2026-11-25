@@ -154,7 +154,7 @@ class PhaseReportTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'do not match'):
                         nds_bench.get_power_time(path)
                     Path(f'{path}.metrics.json').unlink()
-                    with self.assertRaisesRegex(ValueError, 'legacy reports'):
+                    with self.assertRaisesRegex(ValueError, 'missing metrics companion'):
                         nds_bench.get_power_time(path)
 
     def test_failed_maintenance_saves_diagnostics_before_stopping(self):
